@@ -34,7 +34,7 @@ const CONFIG = {
   // true  = new members get an SMS code to verify their number (about
   //         one SMS per member, ever) and "Forgot PIN?" works by SMS.
   //         Requires the one-time setup in setup/CLICKATELL.md first!
-  USE_SMS_VERIFICATION: false,
+  USE_SMS_VERIFICATION: true,
 
   // ---- Supabase (free tier) — leave blank for Demo mode ----
   SUPABASE_URL: "https://bwpyhcuhqezujlbxkrsr.supabase.co",

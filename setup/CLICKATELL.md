@@ -34,9 +34,13 @@ Everything below happens in web dashboards — no tools to install.
 
 1. **Edge Functions → Secrets** → add:
    - `CLICKATELL_API_KEY` = the key from step 1
-2. **Authentication → Hooks** → **Send SMS hook** → Enable, choose
-   **Edge Function** → `send-sms`. Copy the **secret** it shows you
-   (starts with `v1,whsec_`).
+2. **Authentication → Hooks** → **Send SMS hook** → Enable. For **Hook type**
+   choose **HTTPS** (there is no "Edge Function" choice — an Edge Function is
+   just an HTTPS endpoint). Fill in:
+   - **URL:** `https://<your-project-ref>.supabase.co/functions/v1/send-sms`
+     (your ref is the first part of your Supabase URL — for this project it is
+     `https://bwpyhcuhqezujlbxkrsr.supabase.co/functions/v1/send-sms`)
+   - Save. Supabase generates a **secret** (starts with `v1,whsec_`) — copy it.
 3. Back in **Edge Functions → Secrets** → add:
    - `SEND_SMS_HOOK_SECRET` = that secret
 4. **Authentication → Sign In / Providers** → enable the **Phone** provider.
