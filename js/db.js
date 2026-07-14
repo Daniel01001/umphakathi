@@ -33,6 +33,27 @@ const DB = (() => {
     write(key, val) { localStorage.setItem(key, JSON.stringify(val)); },
   };
 
+  // "071 234 5678" → "+27712345678". Accepts any common way of writing
+  // a South African number so the same person always gets the same account.
+  function toE164(phone) {
+    let d = String(phone ?? "").replace(/\D/g, "");
+    if (d.startsWith("0")) d = "27" + d.slice(1); // SA local → international
+    if (d.length < 9 || d.length > 13) throw new Error("Please enter a valid phone number.");
+    return "+" + d;
+  }
+
+  // Free mode (no SMS): members sign in with a phone number, but Supabase
+  // accounts need an email-shaped ID — so "071 234 5678" becomes
+  // "p27712345678@members.app" behind the scenes. Nothing is ever sent.
+  function phoneToEmail(phone) {
+    return `p${toE164(phone).slice(1)}@members.app`;
+  }
+
+  function emailToPhone(email) {
+    const m = /^p(\d+)@members\.app$/.exec(email ?? "");
+    return m ? `+${m[1]}` : null;
+  }
+
   const uid = () => Math.random().toString(36).slice(2, 10);
   const now = () => new Date().toISOString();
   const minsAgo = (m) => new Date(Date.now() - m * 60000).toISOString();
@@ -136,30 +157,99 @@ const DB = (() => {
         const { data: { user } } = await sb.auth.getUser();
         if (!user) return null;
         const { data: profile } = await sb.from("profiles").select("*").eq("id", user.id).single();
-        return profile ? { id: user.id, name: profile.display_name, area: profile.area, email: user.email } : null;
+        if (!profile) return null;
+        const phone = user.phone ? `+${user.phone}` : emailToPhone(user.email);
+        return {
+          id: user.id, name: profile.display_name, area: profile.area,
+          phone, email: phone ? null : user.email,
+        };
       }
       return LS.read("ch_user", null);
     },
 
-    // Demo: join with just a name. Supabase: email + password.
-    async signUp({ name, area, email, password }) {
+    // True when SMS codes are available (Clickatell hook configured).
+    get supportsOtp() { return useSupabase && !!CONFIG.USE_SMS_VERIFICATION; },
+
+    // Demo: join with just a name. Supabase: phone number + PIN.
+    // With SMS verification on, sign-up pauses for an SMS code:
+    // the caller gets { needsOtp: true } and must call verifyOtp next.
+    async signUp({ name, area, phone, password }) {
       if (useSupabase) {
-        const { data, error } = await sb.auth.signUp({ email, password });
-        if (error) throw new Error(error.message);
+        const creds = this.supportsOtp
+          ? { phone: toE164(phone), password }
+          : { email: phoneToEmail(phone), password };
+        const { data, error } = await sb.auth.signUp(creds);
+        if (error) {
+          if (/already registered/i.test(error.message))
+            throw new Error("That phone number is already a member — tap Sign in instead.");
+          throw new Error(error.message);
+        }
+        if (this.supportsOtp) return { needsOtp: true, phone };
         const { error: pErr } = await sb.from("profiles")
           .insert({ id: data.user.id, display_name: name, area });
         if (pErr) throw new Error(pErr.message);
-        return { id: data.user.id, name, area, email };
+        return { id: data.user.id, name, area, phone: toE164(phone) };
       }
       const user = { id: uid(), name, area };
       LS.write("ch_user", user);
       return user;
     },
 
-    async signIn({ email, password }) {
+    // Step 2 of SMS sign-up: check the code, then create the profile.
+    async verifyOtp({ phone, token, name, area }) {
+      const { data, error } = await sb.auth.verifyOtp({ phone: toE164(phone), token, type: "sms" });
+      if (error) {
+        if (/invalid|expired/i.test(error.message))
+          throw new Error("That code is wrong or has expired — please try again.");
+        throw new Error(error.message);
+      }
+      const { error: pErr } = await sb.from("profiles")
+        .insert({ id: data.user.id, display_name: name, area });
+      if (pErr && pErr.code !== "23505") throw new Error(pErr.message); // 23505 = profile already exists
+      return { id: data.user.id, name, area, phone: toE164(phone) };
+    },
+
+    async resendOtp(phone) {
+      const { error } = await sb.auth.resend({ type: "sms", phone: toE164(phone) });
+      if (error) throw new Error(error.message);
+    },
+
+    // "Forgot PIN": SMS a login code, then set a new PIN once verified.
+    async requestPinReset(phone) {
+      const { error } = await sb.auth.signInWithOtp({
+        phone: toE164(phone),
+        options: { shouldCreateUser: false },
+      });
+      if (error) {
+        if (/not found|signups not allowed/i.test(error.message))
+          throw new Error("That phone number is not a member yet.");
+        throw new Error(error.message);
+      }
+    },
+
+    async confirmPinReset({ phone, token, newPin }) {
+      const { error } = await sb.auth.verifyOtp({ phone: toE164(phone), token, type: "sms" });
+      if (error) {
+        if (/invalid|expired/i.test(error.message))
+          throw new Error("That code is wrong or has expired — please try again.");
+        throw new Error(error.message);
+      }
+      const { error: uErr } = await sb.auth.updateUser({ password: newPin });
+      if (uErr) throw new Error(uErr.message);
+      return this.currentUser();
+    },
+
+    async signIn({ phone, password }) {
       if (useSupabase) {
-        const { error } = await sb.auth.signInWithPassword({ email, password });
-        if (error) throw new Error(error.message);
+        const creds = this.supportsOtp
+          ? { phone: toE164(phone), password }
+          : { email: phoneToEmail(phone), password };
+        const { error } = await sb.auth.signInWithPassword(creds);
+        if (error) {
+          if (/invalid login credentials/i.test(error.message))
+            throw new Error("Phone number or PIN is wrong — please try again.");
+          throw new Error(error.message);
+        }
         return this.currentUser();
       }
       return null; // demo mode has no sign-in, only join

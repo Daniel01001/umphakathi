@@ -29,6 +29,13 @@ const CONFIG = {
     { id: "alert",    label: "Alerts",     icon: "⚠️" },
   ],
 
+  // ---- SMS verification via Clickatell (optional) ----
+  // false = free mode: members join with phone + PIN, no SMS ever sent.
+  // true  = new members get an SMS code to verify their number (about
+  //         one SMS per member, ever) and "Forgot PIN?" works by SMS.
+  //         Requires the one-time setup in setup/CLICKATELL.md first!
+  USE_SMS_VERIFICATION: false,
+
   // ---- Supabase (free tier) — leave blank for Demo mode ----
   SUPABASE_URL: "https://bwpyhcuhqezujlbxkrsr.supabase.co",
   SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ3cHloY3VocWV6dWpsYnhrcnNyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQwNDM2NjcsImV4cCI6MjA5OTYxOTY2N30.ENeGR5c7mk-WidwrtEI4f_C5NWr_cjpTP3CGOohVm8w",

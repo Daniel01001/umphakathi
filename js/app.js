@@ -82,11 +82,11 @@
             </select>
           </label>
           ${demo ? "" : `
-          <label>Email
-            <input type="email" id="joinEmail" placeholder="you@example.com" required />
+          <label>Phone number
+            <input type="tel" id="joinPhone" placeholder="e.g. 071 234 5678" required />
           </label>
-          <label>Password
-            <input type="password" id="joinPassword" minlength="6" required />
+          <label>Create a PIN (6 or more digits)
+            <input type="password" id="joinPassword" inputmode="numeric" minlength="6" required />
           </label>`}
           <button type="submit" class="btn-primary btn-block">Join the community →</button>
           ${demo
@@ -98,12 +98,15 @@
     $("#joinForm").addEventListener("submit", async (e) => {
       e.preventDefault();
       try {
-        me = await DB.signUp({
+        const details = {
           name: $("#joinName").value.trim(),
           area: $("#joinArea").value,
-          email: $("#joinEmail")?.value.trim(),
+          phone: $("#joinPhone")?.value.trim(),
           password: $("#joinPassword")?.value,
-        });
+        };
+        const result = await DB.signUp(details);
+        if (result?.needsOtp) { renderOtp(details); return; }
+        me = result;
         enterApp();
       } catch (err) {
         toast(err.message);
@@ -116,6 +119,103 @@
     });
   }
 
+  // Step 2 of SMS sign-up: the code arrives on the member's phone.
+  function renderOtp(details) {
+    view.innerHTML = `
+      <div class="welcome">
+        <div class="welcome-hero">
+          <div class="welcome-mark">💬</div>
+          <h1>Check your SMS</h1>
+          <p class="welcome-sub">We sent a code to <strong>${esc(details.phone)}</strong>. Type it below to finish joining.</p>
+        </div>
+        <form class="welcome-form" id="otpForm">
+          <label>SMS code
+            <input type="text" id="otpCode" inputmode="numeric" autocomplete="one-time-code"
+              maxlength="8" placeholder="e.g. 123456" required />
+          </label>
+          <button type="submit" class="btn-primary btn-block">Verify →</button>
+          <p class="welcome-note">
+            No SMS after a minute? <a href="#" id="resendOtp">Send it again</a><br />
+            <a href="#" id="otpBack">← Start over</a>
+          </p>
+        </form>
+      </div>`;
+    $("#otpCode").focus();
+
+    $("#otpForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        me = await DB.verifyOtp({
+          phone: details.phone, token: $("#otpCode").value.trim(),
+          name: details.name, area: details.area,
+        });
+        enterApp();
+        toast(`Welcome, ${me.name.split(" ")[0]}! 🎉`);
+      } catch (err) { toast(err.message); }
+    });
+    $("#resendOtp").addEventListener("click", async (e) => {
+      e.preventDefault();
+      try { await DB.resendOtp(details.phone); toast("New code sent 📲"); }
+      catch (err) { toast(err.message); }
+    });
+    $("#otpBack").addEventListener("click", (e) => { e.preventDefault(); renderWelcome(); });
+  }
+
+  // "Forgot PIN": an SMS code proves it's really them, then they pick a new PIN.
+  function renderForgotPin() {
+    view.innerHTML = `
+      <div class="welcome">
+        <div class="welcome-hero">
+          <div class="welcome-mark">🔑</div>
+          <h1>Reset your PIN</h1>
+          <p class="welcome-sub">We'll SMS a code to your number to make sure it's you.</p>
+        </div>
+        <form class="welcome-form" id="fpPhoneForm">
+          <label>Phone number <input type="tel" id="fpPhone" placeholder="e.g. 071 234 5678" required /></label>
+          <button type="submit" class="btn-primary btn-block">SMS me a code →</button>
+          <p class="welcome-note"><a href="#" id="fpBack">← Back to sign in</a></p>
+        </form>
+      </div>`;
+
+    $("#fpBack").addEventListener("click", (e) => { e.preventDefault(); renderSignIn(); });
+    $("#fpPhoneForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const phone = $("#fpPhone").value.trim();
+      try {
+        await DB.requestPinReset(phone);
+        view.innerHTML = `
+          <div class="welcome">
+            <div class="welcome-hero">
+              <div class="welcome-mark">💬</div>
+              <h1>Check your SMS</h1>
+              <p class="welcome-sub">Enter the code we sent to <strong>${esc(phone)}</strong> and choose a new PIN.</p>
+            </div>
+            <form class="welcome-form" id="fpResetForm">
+              <label>SMS code
+                <input type="text" id="fpCode" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required />
+              </label>
+              <label>New PIN (6 or more digits)
+                <input type="password" id="fpNewPin" inputmode="numeric" minlength="6" required />
+              </label>
+              <button type="submit" class="btn-primary btn-block">Save new PIN →</button>
+              <p class="welcome-note"><a href="#" id="fpBack2">← Start over</a></p>
+            </form>
+          </div>`;
+        $("#fpBack2").addEventListener("click", (ev) => { ev.preventDefault(); renderForgotPin(); });
+        $("#fpResetForm").addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          try {
+            me = await DB.confirmPinReset({
+              phone, token: $("#fpCode").value.trim(), newPin: $("#fpNewPin").value,
+            });
+            enterApp();
+            toast("PIN updated ✔");
+          } catch (err) { toast(err.message); }
+        });
+      } catch (err) { toast(err.message); }
+    });
+  }
+
   function renderSignIn() {
     view.innerHTML = `
       <div class="welcome">
@@ -124,16 +224,20 @@
           <h1>Welcome back</h1>
         </div>
         <form class="welcome-form" id="signInForm">
-          <label>Email <input type="email" id="siEmail" required /></label>
-          <label>Password <input type="password" id="siPassword" required /></label>
+          <label>Phone number <input type="tel" id="siPhone" placeholder="e.g. 071 234 5678" required /></label>
+          <label>PIN <input type="password" id="siPassword" inputmode="numeric" required /></label>
           <button type="submit" class="btn-primary btn-block">Sign in →</button>
-          <p class="welcome-note"><a href="#" id="backToJoin">← New here? Join instead</a></p>
+          <p class="welcome-note">
+            ${DB.supportsOtp ? `<a href="#" id="forgotPin">Forgot your PIN?</a><br />` : ""}
+            <a href="#" id="backToJoin">← New here? Join instead</a>
+          </p>
         </form>
       </div>`;
+    $("#forgotPin")?.addEventListener("click", (e) => { e.preventDefault(); renderForgotPin(); });
     $("#signInForm").addEventListener("submit", async (e) => {
       e.preventDefault();
       try {
-        me = await DB.signIn({ email: $("#siEmail").value.trim(), password: $("#siPassword").value });
+        me = await DB.signIn({ phone: $("#siPhone").value.trim(), password: $("#siPassword").value });
         if (me) enterApp(); else toast("Could not sign in.");
       } catch (err) { toast(err.message); }
     });
@@ -429,7 +533,7 @@
         <div class="card profile-card">
           <span class="avatar avatar-lg">${esc(initials(me.name))}</span>
           <h2>${esc(me.name)}</h2>
-          <p class="profile-sub">${esc(me.area)}${me.email ? ` · ${esc(me.email)}` : ""}</p>
+          <p class="profile-sub">${esc(me.area)}${me.phone ? ` · ${esc(me.phone)}` : ""}</p>
         </div>
         <div class="card about-card">
           <h3>About ${esc(CONFIG.APP_NAME)}</h3>
