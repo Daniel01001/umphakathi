@@ -13,7 +13,12 @@
    ============================================================ */
 
 const DB = (() => {
-  const useSupabase = !!(CONFIG.SUPABASE_URL && CONFIG.SUPABASE_ANON_KEY);
+  // Accept the URL however it was pasted from the Supabase dashboard —
+  // trailing slashes or an accidental /rest/v1/ suffix are stripped.
+  const SUPABASE_URL = (CONFIG.SUPABASE_URL || "")
+    .replace(/\/(rest|auth|storage|realtime)\/v\d+\/?$/, "")
+    .replace(/\/+$/, "");
+  const useSupabase = !!(SUPABASE_URL && CONFIG.SUPABASE_ANON_KEY);
   let sb = null; // supabase client
   let onMessageCallback = null;
 
@@ -112,7 +117,7 @@ const DB = (() => {
           s.onload = resolve; s.onerror = reject;
           document.head.appendChild(s);
         });
-        sb = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+        sb = window.supabase.createClient(SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
         // Realtime chat: notify the UI whenever anyone sends a message.
         sb.channel("room")
           .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, (payload) => {
