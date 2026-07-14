@@ -50,9 +50,14 @@ button { cursor: pointer; background: none; border: none; }
   height: var(--topbar-h);
 }
 .topbar-inner {
-  max-width: 640px; margin: 0 auto; height: 100%;
+  max-width: 1200px; margin: 0 auto; height: 100%;
   display: flex; align-items: center; justify-content: space-between;
   padding: 0 16px;
+}
+.install-btn {
+  background: var(--gold); color: var(--green-dark);
+  font-weight: 700; font-size: 13px;
+  padding: 7px 13px; border-radius: 99px;
 }
 .logo { display: flex; align-items: center; gap: 10px; text-decoration: none; color: #fff; }
 .logo-mark {
@@ -74,16 +79,22 @@ button { cursor: pointer; background: none; border: none; }
   font-weight: 700; font-size: 13px;
 }
 
-/* ---------------- layout ---------------- */
+/* ---------------- layout (mobile-first single column) ---------------- */
 
 .view {
   max-width: 640px; margin: 0 auto;
   padding: calc(var(--topbar-h) + 14px) 14px calc(var(--bottomnav-h) + 24px);
 }
 
+/* Desktop side rails are hidden on mobile; the bottom nav takes over. */
+.leftrail, .rightrail { display: none; }
+
 body.no-chrome .topbar,
-body.no-chrome .bottomnav { display: none; }
-body.no-chrome .view { padding: 0; }
+body.no-chrome .bottomnav,
+body.no-chrome .leftrail,
+body.no-chrome .rightrail { display: none; }
+body.no-chrome .view { padding: 0; max-width: none; }
+body.no-chrome .shell { display: block; }
 
 /* ---------------- bottom nav ---------------- */
 
@@ -306,7 +317,15 @@ body.no-chrome .view { padding: 0; }
 .profile-card .avatar-lg { margin: 0 auto 12px; }
 .profile-card h2 { font-size: 22px; }
 .profile-sub { color: var(--muted); font-size: 14px; }
-.about-card h3 { margin-bottom: 8px; }
+.account-card h3, .about-card h3 { margin-bottom: 8px; }
+.account-row {
+  display: flex; align-items: center; justify-content: space-between;
+  width: 100%; padding: 13px 2px; font-size: 15px; font-weight: 500;
+  text-align: left; color: var(--ink);
+}
+.account-row + .account-row { border-top: 1px solid var(--line); }
+.account-row:hover { color: var(--green); }
+.account-chev { color: var(--muted); font-size: 20px; }
 .about-card p { font-size: 14px; line-height: 1.55; color: var(--muted); margin-bottom: 8px; }
 .mode-note { font-weight: 600; color: var(--ink) !important; }
 
@@ -357,10 +376,70 @@ body.no-chrome .view { padding: 0; }
   max-width: 90vw; text-align: center;
 }
 
-/* ---------------- desktop tweaks ---------------- */
+/* ---------------- desktop side rails (components) ---------------- */
 
-@media (min-width: 700px) {
+.side-nav { display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }
+.side-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 11px 14px; border-radius: 12px;
+  font-size: 15px; font-weight: 600; color: var(--ink); text-align: left;
+}
+.side-item:hover { background: #ece7db; }
+.side-item.active { background: var(--green-soft); color: var(--green-dark); }
+.side-icon { font-size: 20px; width: 24px; text-align: center; }
+.side-post { margin-bottom: 20px; }
+.side-foot { color: var(--muted); font-size: 12.5px; line-height: 1.6; padding: 0 6px; }
+.side-foot a { color: var(--green); font-weight: 600; }
+
+.rail-card {
+  background: var(--card); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 14px 16px; margin-bottom: 16px;
+}
+.rail-title {
+  font-size: 13px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.5px; color: var(--muted); margin-bottom: 12px;
+}
+.rail-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; text-align: left; width: 100%; }
+.rail-row + .rail-row { border-top: 1px solid var(--line); }
+.rail-name { font-weight: 600; font-size: 14px; line-height: 1.2; }
+.rail-sub { color: var(--muted); font-size: 12px; }
+.rail-empty { color: var(--muted); font-size: 13px; }
+.rail-more { color: var(--green); font-weight: 600; font-size: 13px; margin-top: 8px; text-align: left; }
+
+/* ---------------- desktop layout ---------------- */
+
+@media (min-width: 700px) and (max-width: 899px) {
   .view { padding-top: calc(var(--topbar-h) + 24px); }
   .modal-backdrop { align-items: center; }
   .modal { border-radius: 20px; }
+}
+
+@media (min-width: 900px) {
+  .bottomnav { display: none; }
+  .modal-backdrop { align-items: center; }
+  .modal { border-radius: 20px; }
+
+  .shell {
+    display: grid;
+    grid-template-columns: 230px minmax(0, 600px) 300px;
+    justify-content: center; align-items: start;
+    gap: 26px; max-width: 1200px; margin: 0 auto;
+    padding: calc(var(--topbar-h) + 26px) 20px 48px;
+  }
+
+  .view { grid-column: 2; max-width: none; margin: 0; padding: 0; }
+
+  .leftrail, .rightrail {
+    display: block; align-self: start;
+    position: sticky; top: calc(var(--topbar-h) + 26px);
+  }
+  .leftrail { grid-column: 1; }
+  .rightrail { grid-column: 3; }
+
+  /* On desktop the feed's own composer teaser and filter row still work,
+     but the "new post" also lives in the sidebar. */
+  .composer-teaser { cursor: pointer; }
+
+  /* Chat fills the center column height (no bottom nav on desktop). */
+  .chat { height: calc(100dvh - var(--topbar-h) - 90px); }
 }

@@ -260,6 +260,25 @@ const DB = (() => {
       else localStorage.removeItem("ch_user");
     },
 
+    async updateProfile({ name, area }) {
+      if (useSupabase) {
+        const { data: { user } } = await sb.auth.getUser();
+        const { error } = await sb.from("profiles")
+          .update({ display_name: name, area }).eq("id", user.id);
+        if (error) throw new Error(error.message);
+        return;
+      }
+      const user = LS.read("ch_user", {});
+      user.name = name; user.area = area;
+      LS.write("ch_user", user);
+    },
+
+    async changePin(newPin) {
+      if (!useSupabase) throw new Error("Changing your PIN is only available in the live version.");
+      const { error } = await sb.auth.updateUser({ password: newPin });
+      if (error) throw new Error(error.message);
+    },
+
     /* ---------------- Feed / posts ---------------- */
 
     async getPosts() {

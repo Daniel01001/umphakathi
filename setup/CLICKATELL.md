@@ -23,7 +23,10 @@ Everything below happens in web dashboards — no tools to install.
 
 1. Supabase dashboard → **Edge Functions** → **Deploy a new function** →
    **Via Editor**.
-2. Name it exactly: `send-sms`.
+2. Give it a name and **write it down** — Supabase may pre-fill a random name
+   like `super-worker`. Whatever the name is, the Send SMS hook URL in step 3
+   below must use the **same** name, or the hook 404s and you get an empty
+   `{}` error.
 3. Delete the sample code and paste the whole contents of
    [`clickatell-sms-hook.ts`](clickatell-sms-hook.ts), then **Deploy**.
 4. Open the function's **Details / Settings** and switch **Enforce JWT
@@ -37,9 +40,10 @@ Everything below happens in web dashboards — no tools to install.
 2. **Authentication → Hooks** → **Send SMS hook** → Enable. For **Hook type**
    choose **HTTPS** (there is no "Edge Function" choice — an Edge Function is
    just an HTTPS endpoint). Fill in:
-   - **URL:** `https://<your-project-ref>.supabase.co/functions/v1/send-sms`
-     (your ref is the first part of your Supabase URL — for this project it is
-     `https://bwpyhcuhqezujlbxkrsr.supabase.co/functions/v1/send-sms`)
+   - **URL:** `https://<your-project-ref>.supabase.co/functions/v1/<function-name>`
+     where `<function-name>` is the name from step 2 above. For this project,
+     if your function is called `super-worker`, that is
+     `https://bwpyhcuhqezujlbxkrsr.supabase.co/functions/v1/super-worker`
    - Save. Supabase generates a **secret** (starts with `v1,whsec_`) — copy it.
 3. Back in **Edge Functions → Secrets** → add:
    - `SEND_SMS_HOOK_SECRET` = that secret

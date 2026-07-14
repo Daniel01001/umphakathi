@@ -247,6 +247,8 @@
   function enterApp() {
     document.body.classList.remove("no-chrome");
     $("#topAvatar").textContent = initials(me.name);
+    const foot = $("#sideFoot");
+    if (foot) foot.innerHTML = `${esc(CONFIG.TAGLINE)}<br>Built by the community 💛`;
     switchView("feed");
   }
 
@@ -535,6 +537,18 @@
           <h2>${esc(me.name)}</h2>
           <p class="profile-sub">${esc(me.area)}${me.phone ? ` · ${esc(me.phone)}` : ""}</p>
         </div>
+
+        <div class="card account-card">
+          <h3>My account</h3>
+          <button class="account-row" id="editProfileBtn">
+            <span>✏️ Edit name & area</span><span class="account-chev">›</span>
+          </button>
+          ${DB.mode === "demo" ? "" : `
+          <button class="account-row" id="changePinBtn">
+            <span>🔑 Change my PIN</span><span class="account-chev">›</span>
+          </button>`}
+        </div>
+
         <div class="card about-card">
           <h3>About ${esc(CONFIG.APP_NAME)}</h3>
           <p>${esc(CONFIG.TAGLINE)}. Built by the community, for the community — share news,
@@ -543,14 +557,110 @@
             ? "⚠️ Demo mode: your posts are saved on this device only. See README.md to connect the free shared database."
             : "✅ Connected — posts and chat are shared with the whole community."}</p>
         </div>
+
         <button class="btn-outline btn-block" id="signOutBtn">Sign out</button>
       </div>`;
 
+    $("#editProfileBtn").addEventListener("click", openEditProfile);
+    $("#changePinBtn")?.addEventListener("click", openChangePin);
     $("#signOutBtn").addEventListener("click", async () => {
       await DB.signOut();
       me = null;
       renderWelcome();
     });
+  }
+
+  function openEditProfile() {
+    openModal(`
+      <div class="modal-head">
+        <h2>Edit profile</h2>
+        <button class="modal-close" data-close>✕</button>
+      </div>
+      <form id="editForm" class="compose-form">
+        <label>Your name
+          <input type="text" id="editName" value="${esc(me.name)}" maxlength="40" required />
+        </label>
+        <label>Your area
+          <select id="editArea">
+            ${CONFIG.AREAS.map((a) => `<option ${a === me.area ? "selected" : ""}>${esc(a)}</option>`).join("")}
+          </select>
+        </label>
+        <button type="submit" class="btn-primary btn-block">Save changes</button>
+      </form>`);
+
+    $("#editForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const name = $("#editName").value.trim();
+      const area = $("#editArea").value;
+      if (!name) return;
+      try {
+        await DB.updateProfile({ name, area });
+        me.name = name; me.area = area;
+        $("#topAvatar").textContent = initials(name);
+        closeModal();
+        renderProfile();
+        toast("Profile updated ✔");
+      } catch (err) { toast(err.message); }
+    });
+  }
+
+  function openChangePin() {
+    openModal(`
+      <div class="modal-head">
+        <h2>Change my PIN</h2>
+        <button class="modal-close" data-close>✕</button>
+      </div>
+      <form id="pinForm" class="compose-form">
+        <label>New PIN (6 or more digits)
+          <input type="password" id="newPin" inputmode="numeric" minlength="6" required />
+        </label>
+        <label>Confirm new PIN
+          <input type="password" id="newPin2" inputmode="numeric" minlength="6" required />
+        </label>
+        <button type="submit" class="btn-primary btn-block">Update PIN</button>
+      </form>`);
+
+    $("#pinForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const p1 = $("#newPin").value, p2 = $("#newPin2").value;
+      if (p1 !== p2) { toast("The two PINs don't match."); return; }
+      try {
+        await DB.changePin(p1);
+        closeModal();
+        toast("PIN updated ✔");
+      } catch (err) { toast(err.message); }
+    });
+  }
+
+  /* ---------------- right rail (desktop) ---------------- */
+
+  async function renderRightRail() {
+    const rail = $("#rightRail");
+    if (!rail || !me) return;
+    try {
+      const [biz, posts] = await Promise.all([DB.getBusinesses(), DB.getPosts()]);
+      const topBiz = biz.slice(0, 4);
+      const events = posts.filter((p) => p.category === "event").slice(0, 3);
+      rail.innerHTML = `
+        <div class="rail-card">
+          <div class="rail-title">🏪 Local businesses</div>
+          ${topBiz.length ? topBiz.map((b) => `
+            <button class="rail-row" data-nav="market">
+              <span class="avatar biz-avatar avatar-sm">${esc(initials(b.name))}</span>
+              <span><span class="rail-name">${esc(b.name)}</span>
+              <span class="rail-sub">${esc(b.category)} · ${esc(b.area)}</span></span>
+            </button>`).join("") : `<div class="rail-empty">No businesses yet.</div>`}
+          <button class="rail-more" data-nav="market">See all →</button>
+        </div>
+        <div class="rail-card">
+          <div class="rail-title">🎉 Upcoming events</div>
+          ${events.length ? events.map((e) => `
+            <button class="rail-row" data-railfilter="event">
+              <span><span class="rail-name">${esc(e.author)}</span>
+              <span class="rail-sub">${esc(e.text.slice(0, 64))}${e.text.length > 64 ? "…" : ""}</span></span>
+            </button>`).join("") : `<div class="rail-empty">Nothing scheduled yet.</div>`}
+        </div>`;
+    } catch { /* rail is optional; ignore fetch errors */ }
   }
 
   /* ---------------- navigation ---------------- */
@@ -559,18 +669,41 @@
 
   function switchView(name) {
     currentView = name;
-    document.querySelectorAll(".bottomnav .nav-item[data-nav]").forEach((b) =>
+    document.querySelectorAll(".bottomnav .nav-item[data-nav], .side-item").forEach((b) =>
       b.classList.toggle("active", b.dataset.nav === name));
     views[name]();
+    renderRightRail();
     window.scrollTo(0, 0);
   }
 
   document.addEventListener("click", (e) => {
+    const railFilter = e.target.closest("[data-railfilter]");
+    if (railFilter && me) { feedFilter = railFilter.dataset.railfilter; switchView("feed"); return; }
     const nav = e.target.closest("[data-nav]");
     if (nav && me) { switchView(nav.dataset.nav); return; }
     const action = e.target.closest("[data-action=compose]");
     if (action && me) { openComposer(); return; }
     if (e.target.closest("[data-close]") || e.target === modalBackdrop) closeModal();
+  });
+
+  /* ---------------- PWA install button ---------------- */
+
+  let deferredPrompt = null;
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    $("#installBtn").hidden = false;
+  });
+  window.addEventListener("appinstalled", () => {
+    deferredPrompt = null;
+    $("#installBtn").hidden = true;
+  });
+  $("#installBtn").addEventListener("click", async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    await deferredPrompt.userChoice;
+    deferredPrompt = null;
+    $("#installBtn").hidden = true;
   });
 
   /* ---------------- boot ---------------- */

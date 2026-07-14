@@ -13,9 +13,19 @@ Share news, chat with neighbours, and support local businesses.
 | 🏠 Home feed | Posts with photos, likes and comments, filtered by category (News, Talk, For Sale, Events, Alerts) |
 | 💬 Community chat | One shared room for everyone, updates live |
 | 🏪 Business directory | Members list their businesses with Call and WhatsApp buttons |
-| 👤 Profiles | Simple accounts with name and area |
+| 👤 Accounts | Join with phone + PIN; edit your name/area and change your PIN |
+| 📱 Installable app | Works as a PWA — "Add to Home Screen" on any phone, or an Android APK |
+| 💻 Desktop layout | A Facebook-style 3-column view on wide screens, mobile-first on phones |
 
 It works on any phone with a browser — nothing to install from an app store.
+
+## Installing it like an app
+
+- **iPhone:** open the site in Safari → Share → **Add to Home Screen**.
+- **Android:** open in Chrome → an **Install app** button appears (or menu →
+  Install app). For a shareable `.apk` file, see
+  [`setup/ANDROID-APK.md`](setup/ANDROID-APK.md).
+- **Desktop:** an install icon appears in the browser's address bar.
 
 ## Try it right now (Demo mode)
 

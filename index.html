@@ -5,6 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Umphakathi – Community Hub</title>
   <meta name="description" content="Our community's own space — share news, chat, and support local businesses." />
+
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.webmanifest" />
+  <meta name="theme-color" content="#14563a" />
+  <link rel="icon" href="images/favicon-64.png" sizes="64x64" type="image/png" />
+  <link rel="apple-touch-icon" href="images/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Umphakathi" />
+  <meta name="mobile-web-app-capable" content="yes" />
+
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="css/styles.css" />
 </head>
@@ -16,15 +27,36 @@
       <a class="logo" href="#" data-nav="feed"><span class="logo-mark">U</span><span class="logo-text" id="appName">Umphakathi</span></a>
       <div class="topbar-right">
         <span class="mode-pill" id="modePill" hidden>Demo mode</span>
+        <button class="install-btn" id="installBtn" hidden>⬇ Install app</button>
         <button class="avatar-btn" id="topAvatar" data-nav="profile" title="My profile">?</button>
       </div>
     </div>
   </header>
 
-  <!-- Main content: views are rendered here by js/app.js -->
-  <main id="view" class="view"></main>
+  <!-- Desktop 3-column shell. On mobile only the center column shows. -->
+  <div class="shell" id="shell">
 
-  <!-- Bottom navigation (mobile-first) -->
+    <!-- LEFT: desktop sidebar navigation -->
+    <aside class="leftrail" id="leftRail">
+      <nav class="side-nav">
+        <button class="side-item active" data-nav="feed"><span class="side-icon">🏠</span> Home</button>
+        <button class="side-item" data-nav="chat"><span class="side-icon">💬</span> Community chat</button>
+        <button class="side-item" data-nav="market"><span class="side-icon">🏪</span> Local businesses</button>
+        <button class="side-item" data-nav="profile"><span class="side-icon">👤</span> My profile</button>
+      </nav>
+      <button class="btn-primary btn-block side-post" data-action="compose">＋ New post</button>
+      <div class="side-foot" id="sideFoot"></div>
+    </aside>
+
+    <!-- CENTER: views render here -->
+    <main id="view" class="view"></main>
+
+    <!-- RIGHT: contextual rail (businesses, events) — desktop only -->
+    <aside class="rightrail" id="rightRail"></aside>
+
+  </div>
+
+  <!-- Bottom navigation (mobile only) -->
   <nav class="bottomnav" id="bottomNav">
     <button class="nav-item active" data-nav="feed">
       <span class="nav-icon">🏠</span><span class="nav-label">Home</span>
@@ -54,5 +86,14 @@
   <script src="js/config.js"></script>
   <script src="js/db.js"></script>
   <script src="js/app.js"></script>
+  <script>
+    // Register the service worker (PWA install + offline). Ignored on file://.
+    if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("sw.js").catch((err) =>
+          console.warn("Service worker registration failed:", err));
+      });
+    }
+  </script>
 </body>
 </html>
