@@ -18,6 +18,8 @@
   let chatDraft = "";       // preserve a half-typed message across live re-renders
   const chatTypers = new Map(); // name -> timeout id, for the typing indicator
   let typingBroadcastTimer = null;
+  let feedDirty = false;    // a popup changed comments — refresh feed on close
+  let chatImage = null;     // pending chat attachment (data URL / File)
 
   /* ---------------- helpers ---------------- */
 
@@ -43,6 +45,13 @@
   const initials = (name) =>
     (name ?? "?").trim().split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? "").join("");
 
+  // A photo avatar when we have one, otherwise coloured initials.
+  function avatarHtml(name, url, extraClass = "") {
+    const cls = `avatar ${extraClass}`.trim();
+    if (url) return `<span class="${cls} avatar-img"><img src="${esc(url)}" alt="${esc(name)}" loading="lazy" /></span>`;
+    return `<span class="${cls}">${esc(initials(name))}</span>`;
+  }
+
   function toast(msg) {
     const t = $("#toast");
     t.textContent = msg;
@@ -61,6 +70,7 @@
     modalBody.innerHTML = "";
     composerImage = null;
     document.body.classList.remove("modal-open");
+    if (feedDirty) { feedDirty = false; if (currentView === "feed") renderFeed(); }
   }
 
   /* ---------------- welcome / join screen ---------------- */
@@ -260,9 +270,22 @@
     $("#backToJoin").addEventListener("click", (e) => { e.preventDefault(); renderWelcome(); });
   }
 
+  // Top-bar avatar: photo if we have one, else initials.
+  function setTopAvatar() {
+    const el = $("#topAvatar");
+    if (!el) return;
+    if (me?.avatar) {
+      el.classList.add("avatar-img");
+      el.innerHTML = `<img src="${esc(me.avatar)}" alt="${esc(me.name)}" />`;
+    } else {
+      el.classList.remove("avatar-img");
+      el.textContent = me ? initials(me.name) : "?";
+    }
+  }
+
   function enterApp() {
     document.body.classList.remove("no-chrome");
-    $("#topAvatar").textContent = initials(me.name);
+    setTopAvatar();
     const foot = $("#sideFoot");
     if (foot) foot.innerHTML = `${esc(CONFIG.TAGLINE)}<br>Built by the community 💛`;
     switchView("feed");
@@ -284,7 +307,7 @@
         </div>
 
         <button class="composer-teaser" data-action="compose">
-          <span class="avatar">${esc(initials(me.name))}</span>
+          ${avatarHtml(me.name, me.avatar)}
           <span class="composer-hint">Share something with the community…</span>
         </button>
 
@@ -322,23 +345,24 @@
         if (!box.hidden) $(".comment-form:not(.reply-form) input", box)?.focus();
       }));
 
-    // "Reply" shows the inline reply box under that comment
-    view.querySelectorAll("[data-reply]").forEach((b) =>
-      b.addEventListener("click", () => {
-        const form = $(`#reply-${b.dataset.reply}`, view);
-        form.hidden = !form.hidden;
-        if (!form.hidden) $("input", form).focus();
-      }));
+    // comment like / reply / delete / view-all — shared with the comments popup
+    wireCommentActions(view, () => renderFeed());
 
-    // comment + reply forms (a reply carries the parent comment's id)
-    view.querySelectorAll("form[data-comment-form]").forEach((f) =>
-      f.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const input = $("input", f);
-        const text = input.value.trim();
-        if (!text) return;
-        await DB.addComment(f.dataset.commentForm, text, f.dataset.parent || null);
+    // three-dot post menu (own posts)
+    view.querySelectorAll("[data-postmenu]").forEach((b) =>
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const menu = b.parentElement.querySelector(".post-menu");
+        const wasHidden = menu.hidden;
+        view.querySelectorAll(".post-menu").forEach((m) => (m.hidden = true));
+        menu.hidden = !wasHidden;
+      }));
+    view.querySelectorAll("[data-delpost]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        if (!confirm("Delete this post? This can't be undone.")) return;
+        await DB.deletePost(b.dataset.delpost);
         renderFeed();
+        toast("Post deleted");
       }));
   }
 
@@ -349,24 +373,30 @@
     return `
       <article class="card post">
         <header class="post-head">
-          <span class="avatar">${esc(initials(p.author))}</span>
+          ${avatarHtml(p.author, p.authorAvatar)}
           <div class="post-meta">
             <div class="post-author">${esc(p.author)}</div>
-            <div class="post-sub">${esc(p.area)} · ${timeAgo(p.createdAt)}</div>
+            <div class="post-sub">${esc(p.area)} · ${timeAgo(p.createdAt)} · <span class="cat-inline">${cat.icon} ${esc(cat.label)}</span></div>
           </div>
-          <span class="cat-badge cat-${esc(p.category)}">${cat.icon} ${esc(cat.label)}</span>
+          ${p.mine ? `
+          <div class="post-menu-wrap">
+            <button class="post-menu-btn" data-postmenu="${esc(p.id)}" aria-label="Post options">⋯</button>
+            <div class="post-menu" hidden>
+              <button class="post-menu-item" data-delpost="${esc(p.id)}">🗑️ Delete post</button>
+            </div>
+          </div>` : ""}
         </header>
         <p class="post-text">${esc(p.text)}</p>
         ${p.image ? `<img class="post-img" src="${esc(p.image)}" alt="Photo shared by ${esc(p.author)}" loading="lazy" />` : ""}
-        ${reactTotal ? `
+        ${reactTotal || p.commentCount ? `
         <div class="react-summary">
-          <span class="react-faces">${reactEntries.slice(0, 3).map(([e]) => e).join("")}</span> ${reactTotal}
+          ${reactTotal ? `<span class="react-faces">${reactEntries.slice(0, 3).map(([e]) => e).join("")}</span> ${reactTotal}` : ""}
           <span class="react-comments-count">${p.commentCount ? `${p.commentCount} comment${p.commentCount > 1 ? "s" : ""}` : ""}</span>
         </div>` : ""}
         <footer class="post-actions">
           <div class="react-wrap">
             <button class="action ${p.myReaction ? "action-on" : ""}" data-react-toggle="${esc(p.id)}">
-              ${p.myReaction ?? "👍"} ${p.myReaction ? "You" : "React"}
+              ${p.myReaction ?? "👍"} ${p.myReaction ? "You" : "Like"}
             </button>
             <div class="react-picker" hidden>
               ${CONFIG.REACTIONS.map((e) => `
@@ -379,13 +409,90 @@
           </button>
         </footer>
         <div class="comments" id="comments-${esc(p.id)}" ${p.comments.length ? "" : "hidden"}>
-          ${p.comments.map((c) => commentHtml(p.id, c)).join("")}
+          ${commentsPreviewHtml(p)}
           <form class="comment-form" data-comment-form="${esc(p.id)}">
+            ${avatarHtml(me.name, me.avatar, "avatar-sm")}
             <input type="text" placeholder="Write a comment…" maxlength="500" />
             <button type="submit" class="btn-mini">Send</button>
           </form>
         </div>
       </article>`;
+  }
+
+  const COMMENT_PREVIEW = 2; // top-level comments shown inline; rest go to the popup
+
+  const countComments = (nodes) =>
+    (nodes ?? []).reduce((n, c) => n + 1 + countComments(c.replies), 0);
+
+  // Inline preview: first couple of threads, with a "View all" link to the popup.
+  function commentsPreviewHtml(p) {
+    const preview = (p.comments ?? []).slice(0, COMMENT_PREVIEW);
+    const shown = countComments(preview);
+    const more = p.commentCount - shown;
+    return `
+      ${more > 0 ? `<button class="view-all-comments" data-viewall="${esc(p.id)}">View all ${p.commentCount} comments →</button>` : ""}
+      ${preview.map((c) => commentHtml(p.id, c)).join("")}`;
+  }
+
+  // Attach comment like/reply/delete/view-all handlers within `root`.
+  // `refresh` re-renders whatever surface we're on after a change.
+  function wireCommentActions(root, refresh) {
+    root.querySelectorAll("[data-clike]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        await DB.toggleCommentLike(b.dataset.clike);
+        refresh();
+      }));
+
+    root.querySelectorAll("[data-delcomment]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        if (!confirm("Delete this comment?")) return;
+        await DB.deleteComment(b.dataset.delcomment);
+        refresh();
+      }));
+
+    // reply toggle — scoped to this comment (no global ids, so the popup and
+    // the feed preview never clash)
+    root.querySelectorAll("[data-reply]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const form = b.closest(".comment-body").querySelector(":scope > .reply-form");
+        form.hidden = !form.hidden;
+        if (!form.hidden) $("input", form).focus();
+      }));
+
+    root.querySelectorAll("form[data-comment-form]").forEach((f) =>
+      f.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const input = $("input", f);
+        const text = input.value.trim();
+        if (!text) return;
+        await DB.addComment(f.dataset.commentForm, text, f.dataset.parent || null);
+        refresh();
+      }));
+
+    root.querySelectorAll("[data-viewall]").forEach((b) =>
+      b.addEventListener("click", () => openCommentsModal(b.dataset.viewall)));
+  }
+
+  // Full comments popup — scrollable, handles a post with many comments.
+  async function openCommentsModal(postId) {
+    const posts = await DB.getPosts();
+    const p = posts.find((x) => x.id === postId);
+    if (!p) return;
+    openModal(`
+      <div class="modal-head">
+        <h2>${p.commentCount} comment${p.commentCount === 1 ? "" : "s"}</h2>
+        <button class="modal-close" data-close>✕</button>
+      </div>
+      <div class="comments comments-modal" id="modalComments">
+        ${(p.comments ?? []).map((c) => commentHtml(p.id, c)).join("") || `<div class="empty">Be the first to comment.</div>`}
+      </div>
+      <form class="comment-form comment-form-sticky" data-comment-form="${esc(p.id)}">
+        ${avatarHtml(me.name, me.avatar, "avatar-sm")}
+        <input type="text" placeholder="Write a comment…" maxlength="500" />
+        <button type="submit" class="btn-mini">Send</button>
+      </form>`);
+    feedDirty = true; // refresh the feed once the popup closes
+    wireCommentActions(modalBody, () => openCommentsModal(postId));
   }
 
   // Recursive: a comment renders its own replies, which render theirs, etc.
@@ -394,13 +501,18 @@
     const indent = depth > 0 ? "comment-nested" : "";
     return `
       <div class="comment ${indent}">
-        <span class="avatar avatar-sm">${esc(initials(c.author))}</span>
+        ${avatarHtml(c.author, c.authorAvatar, "avatar-sm")}
         <div class="comment-body">
           <div class="comment-bubble">
             <span class="comment-author">${esc(c.author)}</span>
             ${esc(c.text)}
           </div>
-          <button class="comment-reply-btn" data-reply="${esc(c.id)}">Reply</button>
+          <div class="comment-actions">
+            <button class="comment-act ${c.likedByMe ? "liked" : ""}" data-clike="${esc(c.id)}">${c.likedByMe ? "❤️ Liked" : "🤍 Like"}${c.likeCount ? ` · ${c.likeCount}` : ""}</button>
+            <button class="comment-act" data-reply="${esc(c.id)}">Reply</button>
+            ${c.mine ? `<button class="comment-act comment-del" data-delcomment="${esc(c.id)}">Delete</button>` : ""}
+            <span class="comment-time">${timeAgo(c.createdAt)}</span>
+          </div>
           <form class="comment-form reply-form" data-comment-form="${esc(postId)}"
             data-parent="${esc(c.id)}" id="reply-${esc(c.id)}" hidden>
             <input type="text" placeholder="Reply to ${esc(c.author.split(" ")[0])}…" maxlength="500" />
@@ -482,11 +594,15 @@
           <p>One room for everyone — keep it friendly 💛</p>
         </div>
         <div class="chat-scroll" id="chatScroll">
-          ${msgs.map(msgBubble).join("") || `<div class="empty">No messages yet — say sawubona! 👋</div>`}
+          ${renderMessageList(msgs) || `<div class="empty">No messages yet — say sawubona! 👋</div>`}
         </div>
         <div class="typing-row" id="typingRow"></div>
         <div class="reply-bar" id="replyBar" hidden></div>
+        <div class="attach-preview" id="attachPreview" hidden></div>
         <form class="chat-form" id="chatForm">
+          <label class="chat-attach" title="Send a photo">📎
+            <input type="file" id="chatPhoto" accept="image/*" hidden />
+          </label>
           <input type="text" id="chatInput" placeholder="Type a message…" maxlength="1000" autocomplete="off" />
           <button type="submit" class="btn-primary chat-send">➤</button>
         </form>
@@ -499,6 +615,15 @@
     input.value = chatDraft;
     updateReplyBar();
     updateTypingRow();
+    updateAttachPreview();
+
+    // attach a photo
+    $("#chatPhoto").addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      chatImage = DB.mode === "demo" ? await fileToDataUrl(file) : file;
+      updateAttachPreview();
+    });
 
     // broadcast "typing" (throttled) while the user writes
     input.addEventListener("input", () => {
@@ -525,43 +650,121 @@
         renderChat();
       }));
 
-    // reply to a message
+    // reply to a message (button)
     view.querySelectorAll("[data-msgreply]").forEach((b) =>
-      b.addEventListener("click", () => {
-        const m = msgs.find((x) => x.id === b.dataset.msgreply);
-        chatReplyTo = m ? { id: m.id, author: m.author, text: m.text } : null;
-        updateReplyBar();
-        input.focus();
-      }));
+      b.addEventListener("click", () => setChatReply(b.dataset.msgreply, msgs, input)));
+
+    // mobile gestures: long-press a bubble to react, swipe left to reply
+    wireChatGestures(msgs, input);
 
     $("#chatForm").addEventListener("submit", async (e) => {
       e.preventDefault();
       const text = input.value.trim();
-      if (!text) return;
-      input.value = ""; chatDraft = "";
+      if (!text && !chatImage) return;
+      const image = chatImage;
+      input.value = ""; chatDraft = ""; chatImage = null; updateAttachPreview();
       const parentId = chatReplyTo?.id || null;
       chatReplyTo = null; updateReplyBar();
-      await DB.sendMessage(text, parentId);
+      try {
+        await DB.sendMessage(text, parentId, image);
+      } catch (err) { toast(err.message); }
       if (currentView === "chat") renderChat();
     });
   }
 
-  function msgBubble(m) {
-    const mine = m.author === me.name;
+  function setChatReply(msgId, msgs, input) {
+    const m = msgs.find((x) => x.id === msgId);
+    chatReplyTo = m ? { id: m.id, author: m.author, text: m.text || "📷 Photo" } : null;
+    updateReplyBar();
+    input?.focus();
+  }
+
+  function updateAttachPreview() {
+    const box = $("#attachPreview");
+    if (!box) return;
+    if (!chatImage) { box.hidden = true; box.innerHTML = ""; return; }
+    const src = typeof chatImage === "string" ? chatImage : URL.createObjectURL(chatImage);
+    box.hidden = false;
+    box.innerHTML = `<img src="${esc(src)}" alt="attachment" /><button class="attach-x" id="attachX">✕</button>`;
+    $("#attachX").addEventListener("click", () => { chatImage = null; updateAttachPreview(); });
+  }
+
+  // Long-press (~450ms) opens the reaction picker; a left swipe sets a reply.
+  function wireChatGestures(msgs, input) {
+    view.querySelectorAll(".msg").forEach((el) => {
+      const id = el.dataset.msgid;
+      let timer = null, startX = 0, startY = 0, moved = false;
+
+      const openReact = () => {
+        const picker = el.querySelector(".react-picker");
+        if (!picker) return;
+        view.querySelectorAll(".react-picker").forEach((p) => (p.hidden = true));
+        picker.hidden = false;
+      };
+
+      el.addEventListener("pointerdown", (e) => {
+        startX = e.clientX; startY = e.clientY; moved = false;
+        timer = setTimeout(() => { timer = null; openReact(); }, 450);
+      });
+      el.addEventListener("pointermove", (e) => {
+        if (Math.abs(e.clientX - startX) > 8 || Math.abs(e.clientY - startY) > 8) {
+          moved = true;
+          if (timer) { clearTimeout(timer); timer = null; }
+        }
+        // follow the finger a little while swiping left
+        const dx = e.clientX - startX;
+        if (dx < 0 && Math.abs(dx) > Math.abs(e.clientY - startY)) {
+          el.style.transform = `translateX(${Math.max(dx, -80)}px)`;
+        }
+      });
+      const end = (e) => {
+        if (timer) { clearTimeout(timer); timer = null; }
+        const dx = e.clientX - startX;
+        el.style.transform = "";
+        if (moved && dx < -55 && Math.abs(dx) > Math.abs(e.clientY - startY)) {
+          setChatReply(id, msgs, input); // swiped left → reply
+        }
+      };
+      el.addEventListener("pointerup", end);
+      el.addEventListener("pointercancel", () => { if (timer) clearTimeout(timer); el.style.transform = ""; });
+    });
+  }
+
+  // WhatsApp-style: group runs of messages from the same person, and put a
+  // date divider whenever the day changes.
+  function renderMessageList(msgs) {
+    let html = "";
+    let prev = null;
+    msgs.forEach((m) => {
+      const newDay = !prev || new Date(m.createdAt).toDateString() !== new Date(prev.createdAt).toDateString();
+      if (newDay) html += `<div class="chat-day"><span>${esc(dayLabel(m.createdAt))}</span></div>`;
+      const grouped = !newDay && prev && prev.author === m.author && !m.replyTo &&
+        (new Date(m.createdAt) - new Date(prev.createdAt)) < 5 * 60000;
+      html += msgBubble(m, grouped);
+      prev = m;
+    });
+    return html;
+  }
+
+  function msgBubble(m, grouped = false) {
+    const mine = m.mine ?? (m.author === me.name);
     const reactEntries = Object.entries(m.reactions || {}).sort((a, b) => b[1] - a[1]);
     const reactTotal = reactEntries.reduce((s, [, n]) => s + n, 0);
+    const hhmm = new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     return `
-      <div class="msg ${mine ? "msg-mine" : ""}">
-        ${mine ? "" : `<span class="avatar avatar-sm">${esc(initials(m.author))}</span>`}
+      <div class="msg ${mine ? "msg-mine" : ""} ${grouped ? "msg-grouped" : ""}" data-msgid="${esc(m.id)}">
+        ${mine ? "" : (grouped ? `<span class="avatar avatar-sm avatar-spacer"></span>` : avatarHtml(m.author, m.authorAvatar, "avatar-sm"))}
         <div class="msg-col">
           <div class="msg-bubble">
             ${m.replyTo ? `<div class="msg-quote"><span class="msg-quote-author">${esc(m.replyTo.author)}</span>${esc((m.replyTo.text || "").slice(0, 80))}</div>` : ""}
-            ${mine ? "" : `<span class="msg-author">${esc(m.author)}</span>`}
-            ${esc(m.text)}
-            <span class="msg-time">${timeAgo(m.createdAt)}</span>
+            ${mine || grouped ? "" : `<span class="msg-author">${esc(m.author)}</span>`}
+            ${m.image ? `<img class="msg-img" src="${esc(m.image)}" alt="Photo" loading="lazy" />` : ""}
+            ${m.text ? `<span class="msg-text">${esc(m.text)}</span>` : ""}
+            <span class="msg-time">${hhmm}</span>
+            ${reactTotal ? `<span class="msg-reacts">${reactEntries.map(([e, n]) => `${e}${n > 1 ? ` ${n}` : ""}`).join("")}</span>` : ""}
           </div>
           <div class="msg-actions">
-            <button class="msg-act" data-msgreact-toggle="${esc(m.id)}" title="React">🙂＋</button>
+            <button class="msg-act" data-msgreact-toggle="${esc(m.id)}" title="React">🙂</button>
             <button class="msg-act" data-msgreply="${esc(m.id)}" title="Reply">↩</button>
             <div class="react-picker" hidden>
               ${CONFIG.REACTIONS.map((e) => `
@@ -569,9 +772,16 @@
                   data-msgreact="${esc(m.id)}" data-emoji="${e}">${e}</button>`).join("")}
             </div>
           </div>
-          ${reactTotal ? `<div class="msg-reacts">${reactEntries.map(([e, n]) => `<span class="msg-react-chip">${e} ${n}</span>`).join("")}</div>` : ""}
         </div>
       </div>`;
+  }
+
+  function dayLabel(iso) {
+    const d = new Date(iso); const today = new Date();
+    const yest = new Date(); yest.setDate(today.getDate() - 1);
+    if (d.toDateString() === today.toDateString()) return "Today";
+    if (d.toDateString() === yest.toDateString()) return "Yesterday";
+    return d.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "short" });
   }
 
   function updateReplyBar() {
@@ -695,7 +905,11 @@
     view.innerHTML = `
       <div class="profile">
         <div class="card profile-card">
-          <span class="avatar avatar-lg">${esc(initials(me.name))}</span>
+          <button class="avatar-edit" id="avatarBtn" title="Change photo">
+            ${avatarHtml(me.name, me.avatar, "avatar-lg")}
+            <span class="avatar-edit-badge">📷</span>
+          </button>
+          <input type="file" id="avatarInput" accept="image/*" hidden />
           <h2>${esc(me.name)}</h2>
           <p class="profile-sub">${esc(me.area)}${me.phone ? ` · ${esc(me.phone)}` : ""}</p>
         </div>
@@ -732,13 +946,36 @@
     $("#editProfileBtn").addEventListener("click", openEditProfile);
     $("#changePinBtn")?.addEventListener("click", openChangePin);
     if (DB.supportsPush) setupPushToggle();
+
+    // profile photo upload
+    $("#avatarBtn").addEventListener("click", () => $("#avatarInput").click());
+    $("#avatarInput").addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      try {
+        toast("Uploading photo…");
+        const payload = DB.mode === "demo" ? await fileToDataUrl(file) : file;
+        const url = await DB.setAvatar(payload);
+        me.avatar = url;
+        setTopAvatar();
+        renderProfile();
+        toast("Photo updated 📷");
+      } catch (err) { toast(err.message); }
+    });
+
     $("#signOutBtn").addEventListener("click", async () => {
       await DB.signOut();
       me = null;
-      $("#topAvatar").textContent = "?";
+      setTopAvatar();
       renderAuthLanding();
     });
   }
+
+  const fileToDataUrl = (file) => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result); r.onerror = rej;
+    r.readAsDataURL(file);
+  });
 
   /* ---------------- push notifications ---------------- */
 
@@ -901,6 +1138,12 @@
   }
 
   document.addEventListener("click", (e) => {
+    // close any open pop-overs when clicking away from their trigger
+    if (!e.target.closest(".post-menu-wrap"))
+      document.querySelectorAll(".post-menu").forEach((m) => (m.hidden = true));
+    if (!e.target.closest(".react-wrap") && !e.target.closest(".msg-actions"))
+      document.querySelectorAll(".react-picker").forEach((p) => (p.hidden = true));
+
     const railFilter = e.target.closest("[data-railfilter]");
     if (railFilter && me) { feedFilter = railFilter.dataset.railfilter; switchView("feed"); return; }
     const nav = e.target.closest("[data-nav]");

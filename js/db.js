@@ -196,6 +196,7 @@ const DB = (() => {
         const phone = user.phone ? `+${user.phone}` : emailToPhone(user.email);
         return {
           id: user.id, name: profile.display_name, area: profile.area,
+          avatar: profile.avatar_url || null,
           phone, email: phone ? null : user.email,
         };
       }
@@ -308,6 +309,27 @@ const DB = (() => {
       LS.write("ch_user", user);
     },
 
+    // Upload a profile picture and save its URL. Returns the new avatar URL.
+    // Demo mode keeps a data-URL on the device.
+    async setAvatar(fileOrDataUrl) {
+      if (useSupabase) {
+        const { data: { user } } = await sb.auth.getUser();
+        const path = `avatars/${user.id}.jpg`;
+        const { error: upErr } = await sb.storage.from("photos")
+          .upload(path, fileOrDataUrl, { upsert: true, contentType: fileOrDataUrl.type || "image/jpeg" });
+        if (upErr) throw new Error(upErr.message);
+        // cache-bust so the new photo shows immediately
+        const url = sb.storage.from("photos").getPublicUrl(path).data.publicUrl + "?t=" + Date.now();
+        const { error } = await sb.from("profiles").update({ avatar_url: url }).eq("id", user.id);
+        if (error) throw new Error(error.message);
+        return url;
+      }
+      const user = LS.read("ch_user", {});
+      user.avatar = fileOrDataUrl; // data URL string in demo
+      LS.write("ch_user", user);
+      return fileOrDataUrl;
+    },
+
     async changePin(newPin) {
       if (!useSupabase) throw new Error("Changing your PIN is only available in the live version.");
       const { error } = await sb.auth.updateUser({ password: newPin });
@@ -348,7 +370,7 @@ const DB = (() => {
         // NOTE: posts relate to profiles two ways (author + via likes), so the
         // author join must name its foreign key or PostgREST refuses (error 300).
         const { data, error } = await sb.from("posts")
-          .select("*, profiles!posts_user_id_fkey(display_name, area), likes(user_id, reaction), comments(id, body, created_at, parent_id, profiles!comments_user_id_fkey(display_name))")
+          .select("*, profiles!posts_user_id_fkey(display_name, area, avatar_url), likes(user_id, reaction), comments(id, body, created_at, parent_id, user_id, profiles!comments_user_id_fkey(display_name, avatar_url), comment_likes(user_id))")
           .order("created_at", { ascending: false }).limit(100);
         if (error) throw new Error(error.message);
         const { data: { user } } = await sb.auth.getUser();
@@ -362,16 +384,22 @@ const DB = (() => {
             .sort((a, b) => a.created_at.localeCompare(b.created_at))
             .map((c) => ({
               id: c.id, author: c.profiles?.display_name ?? "Member",
+              authorAvatar: c.profiles?.avatar_url ?? null,
+              mine: user ? c.user_id === user.id : false,
+              likeCount: (c.comment_likes ?? []).length,
+              likedByMe: user ? (c.comment_likes ?? []).some((l) => l.user_id === user.id) : false,
               text: c.body, createdAt: c.created_at, parentId: c.parent_id,
             }));
           return {
             id: p.id,
             author: p.profiles?.display_name ?? "Member",
+            authorAvatar: p.profiles?.avatar_url ?? null,
             area: p.profiles?.area ?? "",
             category: p.category,
             text: p.body,
             image: p.image_url,
             createdAt: p.created_at,
+            mine: user ? p.user_id === user.id : false,
             reactions,
             myReaction: user ? (p.likes.find((l) => l.user_id === user.id)?.reaction ?? null) : null,
             commentCount: flat.length,
@@ -387,15 +415,32 @@ const DB = (() => {
           const likes = normLikes(p.likes);
           const reactions = {};
           for (const l of likes) reactions[l.reaction] = (reactions[l.reaction] || 0) + 1;
-          const flat = (p.comments ?? []).map((c) => ({ ...c, parentId: c.parentId ?? null }));
+          const flat = (p.comments ?? []).map((c) => ({
+            ...c, parentId: c.parentId ?? null, mine: c.author === me.name,
+            authorAvatar: c.authorAvatar ?? null,
+            likeCount: (c.likes ?? []).length,
+            likedByMe: (c.likes ?? []).includes(me.name),
+          }));
           return {
             ...p,
+            authorAvatar: p.authorAvatar ?? (p.author === me.name ? me.avatar : null) ?? null,
+            mine: p.author === me.name,
             reactions,
             myReaction: likes.find((l) => l.name === me.name)?.reaction ?? null,
             commentCount: flat.length,
             comments: buildCommentTree(flat),
           };
         });
+    },
+
+    async deletePost(postId) {
+      if (useSupabase) {
+        const { error } = await sb.from("posts").delete().eq("id", postId);
+        if (error) throw new Error(error.message);
+        return;
+      }
+      const posts = LS.read("ch_posts", []).filter((p) => p.id !== postId);
+      LS.write("ch_posts", posts);
     },
 
     async createPost({ text, category, image }) {
@@ -417,6 +462,7 @@ const DB = (() => {
       // In demo mode `image` arrives as a data URL string (or null).
       posts.unshift({
         id: uid(), author: me.name, area: me.area, category, text,
+        authorAvatar: me.avatar || null,
         image: image || null, createdAt: now(), likes: [], comments: [],
       });
       LS.write("ch_posts", posts);
@@ -457,8 +503,58 @@ const DB = (() => {
       const posts = LS.read("ch_posts", []);
       const post = posts.find((p) => p.id === postId);
       if (!post) return;
-      post.comments.push({ id: uid(), author: me.name, text, createdAt: now(), parentId });
+      post.comments.push({ id: uid(), author: me.name, authorAvatar: me.avatar || null, text, createdAt: now(), parentId, likes: [] });
       LS.write("ch_posts", posts);
+    },
+
+    async toggleCommentLike(commentId) {
+      if (useSupabase) {
+        const { data: { user } } = await sb.auth.getUser();
+        const { data: existing } = await sb.from("comment_likes")
+          .select("comment_id").eq("comment_id", commentId).eq("user_id", user.id).maybeSingle();
+        if (existing) await sb.from("comment_likes").delete().eq("comment_id", commentId).eq("user_id", user.id);
+        else await sb.from("comment_likes").insert({ comment_id: commentId, user_id: user.id });
+        return;
+      }
+      const me = LS.read("ch_user", {});
+      const posts = LS.read("ch_posts", []);
+      for (const p of posts) {
+        const c = (p.comments ?? []).find((x) => x.id === commentId);
+        if (c) {
+          c.likes = c.likes ?? [];
+          const i = c.likes.indexOf(me.name);
+          if (i >= 0) c.likes.splice(i, 1); else c.likes.push(me.name);
+          LS.write("ch_posts", posts);
+          return;
+        }
+      }
+    },
+
+    // Delete a comment. Its replies cascade away (DB) / are pruned (demo).
+    async deleteComment(commentId) {
+      if (useSupabase) {
+        const { error } = await sb.from("comments").delete().eq("id", commentId);
+        if (error) throw new Error(error.message);
+        return;
+      }
+      const posts = LS.read("ch_posts", []);
+      for (const p of posts) {
+        if (!p.comments) continue;
+        // remove the comment and anything descended from it
+        const toRemove = new Set([commentId]);
+        let changed = true;
+        while (changed) {
+          changed = false;
+          for (const c of p.comments) {
+            if (c.parentId && toRemove.has(c.parentId) && !toRemove.has(c.id)) {
+              toRemove.add(c.id); changed = true;
+            }
+          }
+        }
+        const before = p.comments.length;
+        p.comments = p.comments.filter((c) => !toRemove.has(c.id));
+        if (p.comments.length !== before) { LS.write("ch_posts", posts); return; }
+      }
     },
 
     /* ---------------- Chat ---------------- */
@@ -466,7 +562,7 @@ const DB = (() => {
     async getMessages() {
       if (useSupabase) {
         const { data, error } = await sb.from("messages")
-          .select("*, profiles!messages_user_id_fkey(display_name), message_reactions(user_id, reaction)")
+          .select("*, profiles!messages_user_id_fkey(display_name, avatar_url), message_reactions(user_id, reaction)")
           .order("created_at", { ascending: true }).limit(200);
         if (error) throw new Error(error.message);
         const { data: { user } } = await sb.auth.getUser();
@@ -479,7 +575,9 @@ const DB = (() => {
           }
           return {
             id: m.id, author: m.profiles?.display_name ?? "Member",
-            text: m.body, createdAt: m.created_at,
+            authorAvatar: m.profiles?.avatar_url ?? null,
+            mine: user ? m.user_id === user.id : false,
+            text: m.body, image: m.image_url, createdAt: m.created_at,
             parentId: m.parent_id,
             replyTo: m.parent_id ? byId[m.parent_id] ?? null : null,
             reactions,
@@ -497,6 +595,8 @@ const DB = (() => {
         for (const l of likes) reactions[l.reaction] = (reactions[l.reaction] || 0) + 1;
         return {
           ...m,
+          authorAvatar: m.authorAvatar ?? (m.author === me.name ? me.avatar : null) ?? null,
+          mine: m.author === me.name,
           parentId: m.parentId ?? null,
           replyTo: m.parentId ? byId[m.parentId] ?? null : null,
           reactions,
@@ -505,16 +605,24 @@ const DB = (() => {
       });
     },
 
-    async sendMessage(text, parentId = null) {
+    async sendMessage(text, parentId = null, image = null) {
       if (useSupabase) {
         const { data: { user } } = await sb.auth.getUser();
-        const { error } = await sb.from("messages").insert({ user_id: user.id, body: text, parent_id: parentId });
+        let image_url = null;
+        if (image) {
+          const path = `${user.id}/chat-${Date.now()}.jpg`;
+          const { error: upErr } = await sb.storage.from("photos").upload(path, image);
+          if (upErr) throw new Error(upErr.message);
+          image_url = sb.storage.from("photos").getPublicUrl(path).data.publicUrl;
+        }
+        const { error } = await sb.from("messages")
+          .insert({ user_id: user.id, body: text, parent_id: parentId, image_url });
         if (error) throw new Error(error.message);
         return;
       }
       const me = LS.read("ch_user", {});
       const msgs = LS.read("ch_messages", []);
-      msgs.push({ id: uid(), author: me.name, text, createdAt: now(), parentId, reactions: [] });
+      msgs.push({ id: uid(), author: me.name, authorAvatar: me.avatar || null, text, image: image || null, createdAt: now(), parentId, reactions: [] });
       LS.write("ch_messages", msgs);
     },
 
