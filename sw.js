@@ -9,7 +9,7 @@
    pick up the new version.
    ============================================================ */
 
-const CACHE_VERSION = "umphakathi-v2";
+const CACHE_VERSION = "umphakathi-v4";
 const SHELL = [
   "./",
   "./index.html",
@@ -70,4 +70,36 @@ self.addEventListener("fetch", (event) => {
       })
     );
   }
+});
+
+/* ---------------- push notifications ---------------- */
+
+// A push arrives (even with the app closed) — show a notification.
+self.addEventListener("push", (event) => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch { data = { body: event.data?.text() }; }
+  const title = data.title || "Umphakathi";
+  const options = {
+    body: data.body || "",
+    icon: "images/icon-192.png",
+    badge: "images/icon-192.png",
+    tag: data.tag || "post",            // same tag replaces, doesn't stack endlessly
+    data: { url: data.url || "./index.html" },
+    vibrate: data.urgent ? [200, 100, 200] : [100],
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+// Tapping the notification focuses the app (or opens it).
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = event.notification.data?.url || "./index.html";
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      for (const c of clients) {
+        if ("focus" in c) return c.focus();
+      }
+      if (self.clients.openWindow) return self.clients.openWindow(target);
+    })
+  );
 });

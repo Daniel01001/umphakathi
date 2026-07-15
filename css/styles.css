@@ -310,8 +310,10 @@ body.no-chrome .shell { display: block; }
   display: flex; flex-direction: column; gap: 10px;
   padding: 4px 2px 12px;
 }
-.msg { display: flex; gap: 8px; max-width: 85%; }
+.msg { display: flex; gap: 8px; max-width: 88%; }
 .msg-mine { align-self: flex-end; }
+.msg-col { display: flex; flex-direction: column; min-width: 0; }
+.msg-mine .msg-col { align-items: flex-end; }
 .msg-bubble {
   background: var(--card); border-radius: 4px 14px 14px 14px;
   padding: 9px 13px; font-size: 14.5px; line-height: 1.45;
@@ -323,7 +325,46 @@ body.no-chrome .shell { display: block; }
 }
 .msg-author { display: block; font-weight: 700; font-size: 12px; color: var(--green); }
 .msg-time { display: block; font-size: 10.5px; opacity: 0.6; margin-top: 3px; }
-.chat-form { display: flex; gap: 8px; padding-top: 10px; }
+
+/* quoted message being replied to */
+.msg-quote {
+  border-left: 3px solid var(--gold); background: rgba(0, 0, 0, 0.05);
+  border-radius: 6px; padding: 4px 8px; margin-bottom: 5px;
+  font-size: 12.5px; line-height: 1.35; opacity: 0.9;
+}
+.msg-mine .msg-quote { background: rgba(255, 255, 255, 0.18); }
+.msg-quote-author { display: block; font-weight: 700; font-size: 11.5px; }
+
+/* per-message actions (react / reply) */
+.msg-actions { position: relative; display: flex; gap: 2px; margin-top: 2px; opacity: 0.75; }
+.msg-act { font-size: 12.5px; padding: 2px 7px; border-radius: 99px; color: var(--muted); }
+.msg-act:hover { background: var(--bg); color: var(--green); }
+.msg-actions .react-picker { bottom: calc(100% + 4px); }
+.msg-reacts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.msg-react-chip {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 99px; padding: 1px 7px; font-size: 12px; box-shadow: var(--shadow);
+}
+
+/* typing indicator */
+.typing-row { min-height: 18px; font-size: 12.5px; color: var(--muted); padding: 0 4px 2px; display: flex; align-items: center; gap: 6px; }
+.typing-dots { display: inline-flex; gap: 3px; }
+.typing-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); animation: typing 1.2s infinite; }
+.typing-dots i:nth-child(2) { animation-delay: 0.2s; }
+.typing-dots i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes typing { 0%, 60%, 100% { opacity: 0.3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
+
+/* reply preview bar above the input */
+.reply-bar { padding: 0 2px 6px; }
+.reply-bar-inner {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--green-soft); border-left: 3px solid var(--green);
+  border-radius: 8px; padding: 7px 10px; font-size: 13px;
+}
+.reply-bar-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reply-bar-x { color: var(--muted); font-size: 15px; padding: 2px 6px; }
+
+.chat-form { display: flex; gap: 8px; padding-top: 4px; }
 .chat-form input {
   flex: 1; border: 1.5px solid var(--line); border-radius: 99px;
   padding: 12px 16px; background: var(--card); font-size: 15px;
@@ -359,8 +400,25 @@ body.no-chrome .shell { display: block; }
   text-align: left; color: var(--ink);
 }
 .account-row + .account-row { border-top: 1px solid var(--line); }
-.account-row:hover { color: var(--green); }
+button.account-row:hover { color: var(--green); }
 .account-chev { color: var(--muted); font-size: 20px; }
+.account-toggle { cursor: default; }
+.account-hint { font-size: 12.5px; color: var(--muted); padding: 2px 2px 6px; line-height: 1.45; }
+
+/* toggle switch */
+.switch { position: relative; display: inline-block; width: 46px; height: 26px; flex: 0 0 auto; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.slider {
+  position: absolute; inset: 0; cursor: pointer;
+  background: #cfc9ba; border-radius: 99px; transition: background 0.2s;
+}
+.slider::before {
+  content: ""; position: absolute; height: 20px; width: 20px; left: 3px; top: 3px;
+  background: #fff; border-radius: 50%; transition: transform 0.2s;
+}
+.switch input:checked + .slider { background: var(--green); }
+.switch input:checked + .slider::before { transform: translateX(20px); }
+.switch input:disabled + .slider { opacity: 0.5; cursor: not-allowed; }
 .about-card p { font-size: 14px; line-height: 1.55; color: var(--muted); margin-bottom: 8px; }
 .mode-note { font-weight: 600; color: var(--ink) !important; }
 

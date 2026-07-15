@@ -14,6 +14,10 @@
   let currentView = "feed";
   let feedFilter = "all";
   let composerImage = null; // data URL (demo) / File (supabase)
+  let chatReplyTo = null;   // message being replied to {id, author}
+  let chatDraft = "";       // preserve a half-typed message across live re-renders
+  const chatTypers = new Map(); // name -> timeout id, for the typing indicator
+  let typingBroadcastTimer = null;
 
   /* ---------------- helpers ---------------- */
 
@@ -384,9 +388,12 @@
       </article>`;
   }
 
-  function commentHtml(postId, c) {
+  // Recursive: a comment renders its own replies, which render theirs, etc.
+  // Indentation is capped so deep threads stay readable on a phone.
+  function commentHtml(postId, c, depth = 0) {
+    const indent = depth > 0 ? "comment-nested" : "";
     return `
-      <div class="comment">
+      <div class="comment ${indent}">
         <span class="avatar avatar-sm">${esc(initials(c.author))}</span>
         <div class="comment-body">
           <div class="comment-bubble">
@@ -394,19 +401,12 @@
             ${esc(c.text)}
           </div>
           <button class="comment-reply-btn" data-reply="${esc(c.id)}">Reply</button>
-          ${(c.replies ?? []).map((r) => `
-            <div class="comment comment-nested">
-              <span class="avatar avatar-sm">${esc(initials(r.author))}</span>
-              <div class="comment-bubble">
-                <span class="comment-author">${esc(r.author)}</span>
-                ${esc(r.text)}
-              </div>
-            </div>`).join("")}
           <form class="comment-form reply-form" data-comment-form="${esc(postId)}"
             data-parent="${esc(c.id)}" id="reply-${esc(c.id)}" hidden>
             <input type="text" placeholder="Reply to ${esc(c.author.split(" ")[0])}…" maxlength="500" />
             <button type="submit" class="btn-mini">Send</button>
           </form>
+          ${(c.replies ?? []).map((r) => commentHtml(postId, r, Math.min(depth + 1, 4))).join("")}
         </div>
       </div>`;
   }
@@ -471,6 +471,10 @@
 
   async function renderChat() {
     const msgs = await DB.getMessages();
+    // keep whatever the user was typing when a live update forces a re-render
+    const liveInput = $("#chatInput");
+    if (liveInput) chatDraft = liveInput.value;
+
     view.innerHTML = `
       <div class="chat">
         <div class="chat-head">
@@ -480,6 +484,8 @@
         <div class="chat-scroll" id="chatScroll">
           ${msgs.map(msgBubble).join("") || `<div class="empty">No messages yet — say sawubona! 👋</div>`}
         </div>
+        <div class="typing-row" id="typingRow"></div>
+        <div class="reply-bar" id="replyBar" hidden></div>
         <form class="chat-form" id="chatForm">
           <input type="text" id="chatInput" placeholder="Type a message…" maxlength="1000" autocomplete="off" />
           <button type="submit" class="btn-primary chat-send">➤</button>
@@ -489,28 +495,120 @@
     const scroll = $("#chatScroll");
     scroll.scrollTop = scroll.scrollHeight;
 
+    const input = $("#chatInput");
+    input.value = chatDraft;
+    updateReplyBar();
+    updateTypingRow();
+
+    // broadcast "typing" (throttled) while the user writes
+    input.addEventListener("input", () => {
+      chatDraft = input.value;
+      if (!DB.mode || DB.mode !== "supabase") return;
+      if (!typingBroadcastTimer) {
+        DB.sendTyping(me.name, true);
+        typingBroadcastTimer = setTimeout(() => { typingBroadcastTimer = null; }, 1500);
+      }
+    });
+
+    // message reactions: open picker / choose emoji
+    view.querySelectorAll("[data-msgreact-toggle]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const picker = b.parentElement.querySelector(".react-picker");
+        const wasHidden = picker.hidden;
+        view.querySelectorAll(".react-picker").forEach((p) => (p.hidden = true));
+        picker.hidden = !wasHidden;
+      }));
+    view.querySelectorAll("[data-msgreact]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        const removing = b.classList.contains("react-current");
+        await DB.setMessageReaction(b.dataset.msgreact, removing ? null : b.dataset.emoji);
+        renderChat();
+      }));
+
+    // reply to a message
+    view.querySelectorAll("[data-msgreply]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const m = msgs.find((x) => x.id === b.dataset.msgreply);
+        chatReplyTo = m ? { id: m.id, author: m.author, text: m.text } : null;
+        updateReplyBar();
+        input.focus();
+      }));
+
     $("#chatForm").addEventListener("submit", async (e) => {
       e.preventDefault();
-      const input = $("#chatInput");
       const text = input.value.trim();
       if (!text) return;
-      input.value = "";
-      await DB.sendMessage(text);
+      input.value = ""; chatDraft = "";
+      const parentId = chatReplyTo?.id || null;
+      chatReplyTo = null; updateReplyBar();
+      await DB.sendMessage(text, parentId);
       if (currentView === "chat") renderChat();
     });
   }
 
   function msgBubble(m) {
     const mine = m.author === me.name;
+    const reactEntries = Object.entries(m.reactions || {}).sort((a, b) => b[1] - a[1]);
+    const reactTotal = reactEntries.reduce((s, [, n]) => s + n, 0);
     return `
       <div class="msg ${mine ? "msg-mine" : ""}">
         ${mine ? "" : `<span class="avatar avatar-sm">${esc(initials(m.author))}</span>`}
-        <div class="msg-bubble">
-          ${mine ? "" : `<span class="msg-author">${esc(m.author)}</span>`}
-          ${esc(m.text)}
-          <span class="msg-time">${timeAgo(m.createdAt)}</span>
+        <div class="msg-col">
+          <div class="msg-bubble">
+            ${m.replyTo ? `<div class="msg-quote"><span class="msg-quote-author">${esc(m.replyTo.author)}</span>${esc((m.replyTo.text || "").slice(0, 80))}</div>` : ""}
+            ${mine ? "" : `<span class="msg-author">${esc(m.author)}</span>`}
+            ${esc(m.text)}
+            <span class="msg-time">${timeAgo(m.createdAt)}</span>
+          </div>
+          <div class="msg-actions">
+            <button class="msg-act" data-msgreact-toggle="${esc(m.id)}" title="React">🙂＋</button>
+            <button class="msg-act" data-msgreply="${esc(m.id)}" title="Reply">↩</button>
+            <div class="react-picker" hidden>
+              ${CONFIG.REACTIONS.map((e) => `
+                <button class="react-emoji ${m.myReaction === e ? "react-current" : ""}"
+                  data-msgreact="${esc(m.id)}" data-emoji="${e}">${e}</button>`).join("")}
+            </div>
+          </div>
+          ${reactTotal ? `<div class="msg-reacts">${reactEntries.map(([e, n]) => `<span class="msg-react-chip">${e} ${n}</span>`).join("")}</div>` : ""}
         </div>
       </div>`;
+  }
+
+  function updateReplyBar() {
+    const bar = $("#replyBar");
+    if (!bar) return;
+    if (!chatReplyTo) { bar.hidden = true; bar.innerHTML = ""; return; }
+    bar.hidden = false;
+    bar.innerHTML = `
+      <div class="reply-bar-inner">
+        <span class="reply-bar-text">↩ Replying to <b>${esc(chatReplyTo.author)}</b>: ${esc((chatReplyTo.text || "").slice(0, 50))}</span>
+        <button class="reply-bar-x" id="cancelReply">✕</button>
+      </div>`;
+    $("#cancelReply").addEventListener("click", () => { chatReplyTo = null; updateReplyBar(); });
+  }
+
+  // Someone (not me) is typing — show "X is typing…". Each keystroke refreshes
+  // a 3s timer; when it lapses the name drops off.
+  function handleTyping({ name, isTyping }) {
+    if (!name || name === me?.name) return;
+    if (chatTypers.has(name)) clearTimeout(chatTypers.get(name));
+    if (isTyping) {
+      chatTypers.set(name, setTimeout(() => { chatTypers.delete(name); updateTypingRow(); }, 3000));
+    } else {
+      chatTypers.delete(name);
+    }
+    updateTypingRow();
+  }
+
+  function updateTypingRow() {
+    const row = $("#typingRow");
+    if (!row) return;
+    const names = [...chatTypers.keys()];
+    if (names.length === 0) { row.textContent = ""; return; }
+    const who = names.length === 1 ? `${names[0]} is typing`
+      : names.length === 2 ? `${names[0]} and ${names[1]} are typing`
+      : `${names.length} people are typing`;
+    row.innerHTML = `<span class="typing-dots"><i></i><i></i><i></i></span> ${esc(who)}…`;
   }
 
   /* ---------------- business directory ---------------- */
@@ -611,6 +709,12 @@
           <button class="account-row" id="changePinBtn">
             <span>🔑 Change my PIN</span><span class="account-chev">›</span>
           </button>`}
+          ${DB.supportsPush ? `
+          <div class="account-row account-toggle">
+            <span>🔔 Notify me about new posts</span>
+            <label class="switch"><input type="checkbox" id="pushToggle" /><span class="slider"></span></label>
+          </div>
+          <p class="account-hint" id="pushHint"></p>` : ""}
         </div>
 
         <div class="card about-card">
@@ -627,11 +731,66 @@
 
     $("#editProfileBtn").addEventListener("click", openEditProfile);
     $("#changePinBtn")?.addEventListener("click", openChangePin);
+    if (DB.supportsPush) setupPushToggle();
     $("#signOutBtn").addEventListener("click", async () => {
       await DB.signOut();
       me = null;
       $("#topAvatar").textContent = "?";
       renderAuthLanding();
+    });
+  }
+
+  /* ---------------- push notifications ---------------- */
+
+  // web-push needs the VAPID key as a Uint8Array, not base64url text.
+  function urlBase64ToUint8Array(base64) {
+    const padding = "=".repeat((4 - (base64.length % 4)) % 4);
+    const b64 = (base64 + padding).replace(/-/g, "+").replace(/_/g, "/");
+    const raw = atob(b64);
+    return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+  }
+
+  async function setupPushToggle() {
+    const toggle = $("#pushToggle");
+    const hint = $("#pushHint");
+    if (!toggle) return;
+
+    const reg = await navigator.serviceWorker.ready.catch(() => null);
+    const existing = reg ? await reg.pushManager.getSubscription() : null;
+    const blocked = Notification.permission === "denied";
+
+    toggle.checked = !!existing && Notification.permission === "granted";
+    toggle.disabled = blocked;
+    if (blocked) hint.textContent = "Notifications are blocked in your phone/browser settings — allow them there to switch this on.";
+    else if (toggle.checked) hint.textContent = "On — you'll hear about new posts even when the app is closed.";
+    else hint.textContent = "Off — turn on to get a ping when someone posts.";
+
+    toggle.addEventListener("change", async () => {
+      try {
+        if (toggle.checked) {
+          const perm = await Notification.requestPermission();
+          if (perm !== "granted") {
+            toggle.checked = false;
+            hint.textContent = "You didn't allow notifications, so they stay off.";
+            return;
+          }
+          const sub = await reg.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(CONFIG.VAPID_PUBLIC_KEY),
+          });
+          await DB.savePushSubscription(sub);
+          hint.textContent = "On — you'll hear about new posts even when the app is closed.";
+          toast("Notifications on 🔔");
+        } else {
+          const sub = reg ? await reg.pushManager.getSubscription() : null;
+          if (sub) { await DB.removePushSubscription(sub.endpoint); await sub.unsubscribe(); }
+          hint.textContent = "Off — turn on to get a ping when someone posts.";
+          toast("Notifications off");
+        }
+      } catch (err) {
+        toggle.checked = !toggle.checked;
+        toast(err.message || "Could not change notifications.");
+      }
     });
   }
 
@@ -786,6 +945,7 @@
 
     // Refresh chat live when someone else sends a message (Supabase mode).
     DB.onNewMessage(() => { if (currentView === "chat") renderChat(); });
+    DB.onTyping(handleTyping);
 
     try {
       me = await DB.currentUser();

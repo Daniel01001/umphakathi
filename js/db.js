@@ -20,7 +20,9 @@ const DB = (() => {
     .replace(/\/+$/, "");
   const useSupabase = !!(SUPABASE_URL && CONFIG.SUPABASE_ANON_KEY);
   let sb = null; // supabase client
+  let roomChannel = null;
   let onMessageCallback = null;
+  let onTypingCallback = null;
 
   /* ----------------------------------------------------------
      DEMO MODE — localStorage
@@ -61,6 +63,21 @@ const DB = (() => {
   // treat those as a 👍 so old posts keep their counts.
   const normLikes = (likes) =>
     (likes ?? []).map((l) => (typeof l === "string" ? { name: l, reaction: "👍" } : l));
+
+  // Turn a flat comment list into a nested tree so a reply-to-a-reply nests
+  // under its parent (any depth). Each node gets a `replies` array.
+  const buildCommentTree = (flat) => {
+    const byId = {};
+    flat.forEach((c) => (byId[c.id] = { ...c, replies: [] }));
+    const roots = [];
+    flat.forEach((c) => {
+      const node = byId[c.id];
+      const parent = c.parentId && byId[c.parentId];
+      if (parent) parent.replies.push(node);
+      else roots.push(node);
+    });
+    return roots;
+  };
   const minsAgo = (m) => new Date(Date.now() - m * 60000).toISOString();
 
   function seedDemoData() {
@@ -144,16 +161,29 @@ const DB = (() => {
           document.head.appendChild(s);
         });
         sb = window.supabase.createClient(SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
-        // Realtime chat: notify the UI whenever anyone sends a message.
-        sb.channel("room")
-          .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, (payload) => {
-            if (onMessageCallback) onMessageCallback(payload.new);
+        // Realtime chat: notify the UI when anyone sends a message, reacts, or types.
+        roomChannel = sb.channel("room", { config: { broadcast: { self: false } } })
+          .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, () => {
+            if (onMessageCallback) onMessageCallback();
+          })
+          .on("postgres_changes", { event: "*", schema: "public", table: "message_reactions" }, () => {
+            if (onMessageCallback) onMessageCallback();
+          })
+          .on("broadcast", { event: "typing" }, ({ payload }) => {
+            if (onTypingCallback) onTypingCallback(payload);
           })
           .subscribe();
       } else {
         seedDemoData();
       }
     },
+
+    // Tell the room I'm typing (or stopped). Broadcast only — nothing stored.
+    sendTyping(name, isTyping) {
+      if (!useSupabase || !roomChannel) return;
+      roomChannel.send({ type: "broadcast", event: "typing", payload: { name, isTyping } });
+    },
+    onTyping(cb) { onTypingCallback = cb; },
 
     /* ---------------- Auth / current user ---------------- */
 
@@ -284,6 +314,33 @@ const DB = (() => {
       if (error) throw new Error(error.message);
     },
 
+    /* ---------------- Push notifications ---------------- */
+
+    // True only when push is fully available (live mode + a VAPID key + the
+    // browser supports it). Used to decide whether to show the toggle.
+    get supportsPush() {
+      return useSupabase && !!CONFIG.VAPID_PUBLIC_KEY &&
+        typeof window !== "undefined" &&
+        "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+    },
+
+    // Save this device's push subscription against the signed-in member.
+    async savePushSubscription(sub) {
+      if (!useSupabase) return;
+      const { data: { user } } = await sb.auth.getUser();
+      const json = sub.toJSON();
+      const { error } = await sb.from("push_subscriptions").upsert(
+        { user_id: user.id, endpoint: json.endpoint, subscription: json },
+        { onConflict: "endpoint" }
+      );
+      if (error) throw new Error(error.message);
+    },
+
+    async removePushSubscription(endpoint) {
+      if (!useSupabase || !endpoint) return;
+      await sb.from("push_subscriptions").delete().eq("endpoint", endpoint);
+    },
+
     /* ---------------- Feed / posts ---------------- */
 
     async getPosts() {
@@ -318,8 +375,7 @@ const DB = (() => {
             reactions,
             myReaction: user ? (p.likes.find((l) => l.user_id === user.id)?.reaction ?? null) : null,
             commentCount: flat.length,
-            comments: flat.filter((c) => !c.parentId)
-              .map((c) => ({ ...c, replies: flat.filter((r) => r.parentId === c.id) })),
+            comments: buildCommentTree(flat),
           };
         });
       }
@@ -337,8 +393,7 @@ const DB = (() => {
             reactions,
             myReaction: likes.find((l) => l.name === me.name)?.reaction ?? null,
             commentCount: flat.length,
-            comments: flat.filter((c) => !c.parentId)
-              .map((c) => ({ ...c, replies: flat.filter((r) => r.parentId === c.id) })),
+            comments: buildCommentTree(flat),
           };
         });
     },
@@ -411,27 +466,76 @@ const DB = (() => {
     async getMessages() {
       if (useSupabase) {
         const { data, error } = await sb.from("messages")
-          .select("*, profiles(display_name)")
+          .select("*, profiles!messages_user_id_fkey(display_name), message_reactions(user_id, reaction)")
           .order("created_at", { ascending: true }).limit(200);
         if (error) throw new Error(error.message);
-        return data.map((m) => ({
-          id: m.id, author: m.profiles?.display_name ?? "Member",
-          text: m.body, createdAt: m.created_at,
-        }));
+        const { data: { user } } = await sb.auth.getUser();
+        const byId = {};
+        data.forEach((m) => (byId[m.id] = { author: m.profiles?.display_name ?? "Member", text: m.body }));
+        return data.map((m) => {
+          const reactions = {};
+          for (const r of m.message_reactions ?? []) {
+            reactions[r.reaction] = (reactions[r.reaction] || 0) + 1;
+          }
+          return {
+            id: m.id, author: m.profiles?.display_name ?? "Member",
+            text: m.body, createdAt: m.created_at,
+            parentId: m.parent_id,
+            replyTo: m.parent_id ? byId[m.parent_id] ?? null : null,
+            reactions,
+            myReaction: user ? (m.message_reactions?.find((r) => r.user_id === user.id)?.reaction ?? null) : null,
+          };
+        });
       }
-      return LS.read("ch_messages", []);
+      const me = LS.read("ch_user", {});
+      const msgs = LS.read("ch_messages", []);
+      const byId = {};
+      msgs.forEach((m) => (byId[m.id] = { author: m.author, text: m.text }));
+      return msgs.map((m) => {
+        const likes = normLikes(m.reactions);
+        const reactions = {};
+        for (const l of likes) reactions[l.reaction] = (reactions[l.reaction] || 0) + 1;
+        return {
+          ...m,
+          parentId: m.parentId ?? null,
+          replyTo: m.parentId ? byId[m.parentId] ?? null : null,
+          reactions,
+          myReaction: likes.find((l) => l.name === me.name)?.reaction ?? null,
+        };
+      });
     },
 
-    async sendMessage(text) {
+    async sendMessage(text, parentId = null) {
       if (useSupabase) {
         const { data: { user } } = await sb.auth.getUser();
-        const { error } = await sb.from("messages").insert({ user_id: user.id, body: text });
+        const { error } = await sb.from("messages").insert({ user_id: user.id, body: text, parent_id: parentId });
         if (error) throw new Error(error.message);
         return;
       }
       const me = LS.read("ch_user", {});
       const msgs = LS.read("ch_messages", []);
-      msgs.push({ id: uid(), author: me.name, text, createdAt: now() });
+      msgs.push({ id: uid(), author: me.name, text, createdAt: now(), parentId, reactions: [] });
+      LS.write("ch_messages", msgs);
+    },
+
+    async setMessageReaction(messageId, emoji) {
+      if (useSupabase) {
+        const { data: { user } } = await sb.auth.getUser();
+        if (!emoji) {
+          await sb.from("message_reactions").delete().eq("message_id", messageId).eq("user_id", user.id);
+          return;
+        }
+        const { error } = await sb.from("message_reactions")
+          .upsert({ message_id: messageId, user_id: user.id, reaction: emoji }, { onConflict: "message_id,user_id" });
+        if (error) throw new Error(error.message);
+        return;
+      }
+      const me = LS.read("ch_user", {});
+      const msgs = LS.read("ch_messages", []);
+      const m = msgs.find((x) => x.id === messageId);
+      if (!m) return;
+      m.reactions = normLikes(m.reactions).filter((l) => l.name !== me.name);
+      if (emoji) m.reactions.push({ name: me.name, reaction: emoji });
       LS.write("ch_messages", msgs);
     },
 
