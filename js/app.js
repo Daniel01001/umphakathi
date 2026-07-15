@@ -357,6 +357,8 @@
         view.querySelectorAll(".post-menu").forEach((m) => (m.hidden = true));
         menu.hidden = !wasHidden;
       }));
+    view.querySelectorAll("[data-editpost]").forEach((b) =>
+      b.addEventListener("click", () => openEditPost(b.dataset.editpost)));
     view.querySelectorAll("[data-delpost]").forEach((b) =>
       b.addEventListener("click", async () => {
         if (!confirm("Delete this post? This can't be undone.")) return;
@@ -376,12 +378,13 @@
           ${avatarHtml(p.author, p.authorAvatar)}
           <div class="post-meta">
             <div class="post-author">${esc(p.author)}</div>
-            <div class="post-sub">${esc(p.area)} · ${timeAgo(p.createdAt)} · <span class="cat-inline">${cat.icon} ${esc(cat.label)}</span></div>
+            <div class="post-sub">${esc(p.area)} · ${timeAgo(p.createdAt)}${p.editedAt ? ` · <span class="edited-tag">edited</span>` : ""} · <span class="cat-inline">${cat.icon} ${esc(cat.label)}</span></div>
           </div>
           ${p.mine ? `
           <div class="post-menu-wrap">
             <button class="post-menu-btn" data-postmenu="${esc(p.id)}" aria-label="Post options">⋯</button>
             <div class="post-menu" hidden>
+              <button class="post-menu-item edit" data-editpost="${esc(p.id)}">✏️ Edit post</button>
               <button class="post-menu-item" data-delpost="${esc(p.id)}">🗑️ Delete post</button>
             </div>
           </div>` : ""}
@@ -413,6 +416,7 @@
           <form class="comment-form" data-comment-form="${esc(p.id)}">
             ${avatarHtml(me.name, me.avatar, "avatar-sm")}
             <input type="text" placeholder="Write a comment…" maxlength="500" />
+            <button type="button" class="comment-mic" title="Voice comment">🎤</button>
             <button type="submit" class="btn-mini">Send</button>
           </form>
         </div>
@@ -471,6 +475,18 @@
 
     root.querySelectorAll("[data-viewall]").forEach((b) =>
       b.addEventListener("click", () => openCommentsModal(b.dataset.viewall)));
+
+    // voice comment mic (on the main + popup composers)
+    root.querySelectorAll(".comment-mic").forEach((btn) => {
+      const form = btn.closest("form");
+      wireMic(btn, async (audio) => {
+        await DB.addComment(form.dataset.commentForm, "", form.dataset.parent || null, audio);
+        refresh();
+      }, (recording) => {
+        btn.classList.toggle("recording", recording);
+        btn.textContent = recording ? "⏹" : "🎤";
+      });
+    });
   }
 
   // Full comments popup — scrollable, handles a post with many comments.
@@ -484,28 +500,60 @@
         <button class="modal-close" data-close>✕</button>
       </div>
       <div class="comments comments-modal" id="modalComments">
-        ${(p.comments ?? []).map((c) => commentHtml(p.id, c)).join("") || `<div class="empty">Be the first to comment.</div>`}
+        ${(p.comments ?? []).map((c) => commentHtml(p.id, c, true)).join("") || `<div class="empty">Be the first to comment.</div>`}
       </div>
       <form class="comment-form comment-form-sticky" data-comment-form="${esc(p.id)}">
         ${avatarHtml(me.name, me.avatar, "avatar-sm")}
         <input type="text" placeholder="Write a comment…" maxlength="500" />
+        <button type="button" class="comment-mic" title="Voice comment">🎤</button>
         <button type="submit" class="btn-mini">Send</button>
       </form>`);
     feedDirty = true; // refresh the feed once the popup closes
     wireCommentActions(modalBody, () => openCommentsModal(postId));
   }
 
-  // Recursive: a comment renders its own replies, which render theirs, etc.
-  // Indentation is capped so deep threads stay readable on a phone.
-  function commentHtml(postId, c, depth = 0) {
-    const indent = depth > 0 ? "comment-nested" : "";
+  const REPLY_PREVIEW = 2; // replies shown under a comment before "view more"
+
+  // Flatten a comment's whole reply subtree into one chronological list.
+  // Only two visual levels exist: a top comment and its replies. A reply to a
+  // reply also sits at that one level, but carries who it was aimed at (@Name).
+  function flattenReplies(topComment) {
+    const out = [];
+    const walk = (node, isDirectChild) => {
+      for (const r of node.replies ?? []) {
+        out.push({ c: r, replyTo: isDirectChild ? null : node.author });
+        walk(r, false);
+      }
+    };
+    walk(topComment, true);
+    out.sort((a, b) => a.c.createdAt.localeCompare(b.c.createdAt));
+    return out;
+  }
+
+  // One top-level comment plus its (collapsed) replies.
+  function commentHtml(postId, c, inModal = false) {
+    const replies = flattenReplies(c);
+    const shown = inModal ? replies : replies.slice(0, REPLY_PREVIEW);
+    const more = replies.length - shown.length;
     return `
-      <div class="comment ${indent}">
+      ${commentSingle(postId, c, 0, null)}
+      <div class="reply-group">
+        ${shown.map(({ c: r, replyTo }) => commentSingle(postId, r, 1, replyTo)).join("")}
+        ${more > 0 ? `<button class="view-all-comments view-more-replies" data-viewall="${esc(postId)}">View ${more} more repl${more === 1 ? "y" : "ies"} →</button>` : ""}
+      </div>`;
+  }
+
+  // A single comment bubble (no recursion). `replyTo` shows an @mention.
+  function commentSingle(postId, c, depth, replyTo) {
+    return `
+      <div class="comment ${depth > 0 ? "comment-nested" : ""}">
         ${avatarHtml(c.author, c.authorAvatar, "avatar-sm")}
         <div class="comment-body">
           <div class="comment-bubble">
             <span class="comment-author">${esc(c.author)}</span>
-            ${esc(c.text)}
+            ${replyTo ? `<span class="reply-at">@${esc(replyTo.split(" ")[0])}</span> ` : ""}
+            ${c.audio ? `<audio class="voice-player" controls src="${esc(c.audio)}"></audio>` : ""}
+            ${c.text ? esc(c.text) : ""}
           </div>
           <div class="comment-actions">
             <button class="comment-act ${c.likedByMe ? "liked" : ""}" data-clike="${esc(c.id)}">${c.likedByMe ? "❤️ Liked" : "🤍 Like"}${c.likeCount ? ` · ${c.likeCount}` : ""}</button>
@@ -514,11 +562,10 @@
             <span class="comment-time">${timeAgo(c.createdAt)}</span>
           </div>
           <form class="comment-form reply-form" data-comment-form="${esc(postId)}"
-            data-parent="${esc(c.id)}" id="reply-${esc(c.id)}" hidden>
+            data-parent="${esc(c.id)}" hidden>
             <input type="text" placeholder="Reply to ${esc(c.author.split(" ")[0])}…" maxlength="500" />
             <button type="submit" class="btn-mini">Send</button>
           </form>
-          ${(c.replies ?? []).map((r) => commentHtml(postId, r, Math.min(depth + 1, 4))).join("")}
         </div>
       </div>`;
   }
@@ -579,6 +626,33 @@
     });
   }
 
+  async function openEditPost(postId) {
+    const posts = await DB.getPosts();
+    const p = posts.find((x) => x.id === postId);
+    if (!p) return;
+    openModal(`
+      <div class="modal-head">
+        <h2>Edit post</h2>
+        <button class="modal-close" data-close>✕</button>
+      </div>
+      <form id="editPostForm" class="compose-form">
+        <textarea id="editPostText" rows="5" maxlength="2000" required>${esc(p.text)}</textarea>
+        <button type="submit" class="btn-primary btn-block">Save changes</button>
+      </form>`);
+    const ta = $("#editPostText"); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+    $("#editPostForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = $("#editPostText").value.trim();
+      if (!text) return;
+      try {
+        await DB.editPost(postId, text);
+        closeModal();
+        renderFeed();
+        toast("Post updated ✏️");
+      } catch (err) { toast(err.message); }
+    });
+  }
+
   /* ---------------- chat ---------------- */
 
   async function renderChat() {
@@ -604,6 +678,7 @@
             <input type="file" id="chatPhoto" accept="image/*" hidden />
           </label>
           <input type="text" id="chatInput" placeholder="Type a message…" maxlength="1000" autocomplete="off" />
+          <button type="button" class="chat-mic" id="chatMic" title="Voice note">🎤</button>
           <button type="submit" class="btn-primary chat-send">➤</button>
         </form>
       </div>`;
@@ -656,6 +731,19 @@
 
     // mobile gestures: long-press a bubble to react, swipe left to reply
     wireChatGestures(msgs, input);
+
+    // voice note: record then send as a chat message
+    wireMic($("#chatMic"), async (audio) => {
+      const parentId = chatReplyTo?.id || null;
+      chatReplyTo = null; updateReplyBar();
+      await DB.sendMessage("", parentId, null, audio);
+      if (currentView === "chat") renderChat();
+    }, (recording) => {
+      const m = $("#chatMic");
+      m.classList.toggle("recording", recording);
+      m.textContent = recording ? "⏹" : "🎤";
+      input.placeholder = recording ? "Recording… tap ⏹ to send" : "Type a message…";
+    });
 
     $("#chatForm").addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -759,6 +847,7 @@
             ${m.replyTo ? `<div class="msg-quote"><span class="msg-quote-author">${esc(m.replyTo.author)}</span>${esc((m.replyTo.text || "").slice(0, 80))}</div>` : ""}
             ${mine || grouped ? "" : `<span class="msg-author">${esc(m.author)}</span>`}
             ${m.image ? `<img class="msg-img" src="${esc(m.image)}" alt="Photo" loading="lazy" />` : ""}
+            ${m.audio ? `<audio class="voice-player" controls src="${esc(m.audio)}"></audio>` : ""}
             ${m.text ? `<span class="msg-text">${esc(m.text)}</span>` : ""}
             <span class="msg-time">${hhmm}</span>
             ${reactTotal ? `<span class="msg-reacts">${reactEntries.map(([e, n]) => `${e}${n > 1 ? ` ${n}` : ""}`).join("")}</span>` : ""}
@@ -976,6 +1065,66 @@
     r.onload = () => res(r.result); r.onerror = rej;
     r.readAsDataURL(file);
   });
+
+  /* ---------------- voice notes ---------------- */
+
+  // One recorder shared across chat + comments (only one recording at a time).
+  const Voice = {
+    rec: null, chunks: [], stream: null, active: false,
+    supported() { return !!(navigator.mediaDevices && window.MediaRecorder); },
+    async start() {
+      this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      this.chunks = [];
+      this.rec = new MediaRecorder(this.stream);
+      this.rec.ondataavailable = (e) => { if (e.data.size) this.chunks.push(e.data); };
+      this.rec.start();
+      this.active = true;
+    },
+    stop() {
+      return new Promise((resolve) => {
+        if (!this.rec) return resolve(null);
+        this.rec.onstop = () => {
+          const blob = new Blob(this.chunks, { type: this.chunks[0]?.type || "audio/webm" });
+          this._cleanup();
+          resolve(blob);
+        };
+        this.rec.stop();
+      });
+    },
+    cancel() {
+      try { if (this.rec && this.rec.state !== "inactive") this.rec.stop(); } catch {}
+      this._cleanup();
+    },
+    _cleanup() {
+      if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
+      this.stream = null; this.rec = null; this.chunks = []; this.active = false;
+    },
+  };
+
+  // Wire a mic button that records on first tap and sends on second tap.
+  // `send(audio)` receives a data-URL (demo) or Blob (live). `onState` toggles UI.
+  function wireMic(btn, send, onState) {
+    if (!btn) return;
+    if (!Voice.supported()) { btn.style.display = "none"; return; }
+    btn.addEventListener("click", async () => {
+      if (Voice.active) {
+        const blob = await Voice.stop();
+        onState?.(false);
+        if (!blob || blob.size < 400) return; // ignore empty taps
+        try {
+          const audio = DB.mode === "demo" ? await fileToDataUrl(blob) : blob;
+          await send(audio);
+        } catch (err) { toast(err.message); }
+        return;
+      }
+      try {
+        await Voice.start();
+        onState?.(true);
+      } catch {
+        toast("Couldn't access the microphone. Allow mic access to send voice notes.");
+      }
+    });
+  }
 
   /* ---------------- push notifications ---------------- */
 

@@ -314,7 +314,9 @@ const DB = (() => {
     async setAvatar(fileOrDataUrl) {
       if (useSupabase) {
         const { data: { user } } = await sb.auth.getUser();
-        const path = `avatars/${user.id}.jpg`;
+        // IMPORTANT: the storage policy requires the first folder to be the
+        // member's own id, so the path must start with `${user.id}/`.
+        const path = `${user.id}/avatar.jpg`;
         const { error: upErr } = await sb.storage.from("photos")
           .upload(path, fileOrDataUrl, { upsert: true, contentType: fileOrDataUrl.type || "image/jpeg" });
         if (upErr) throw new Error(upErr.message);
@@ -370,7 +372,7 @@ const DB = (() => {
         // NOTE: posts relate to profiles two ways (author + via likes), so the
         // author join must name its foreign key or PostgREST refuses (error 300).
         const { data, error } = await sb.from("posts")
-          .select("*, profiles!posts_user_id_fkey(display_name, area, avatar_url), likes(user_id, reaction), comments(id, body, created_at, parent_id, user_id, profiles!comments_user_id_fkey(display_name, avatar_url), comment_likes(user_id))")
+          .select("*, profiles!posts_user_id_fkey(display_name, area, avatar_url), likes(user_id, reaction), comments(id, body, audio_url, created_at, parent_id, user_id, profiles!comments_user_id_fkey(display_name, avatar_url), comment_likes(user_id))")
           .order("created_at", { ascending: false }).limit(100);
         if (error) throw new Error(error.message);
         const { data: { user } } = await sb.auth.getUser();
@@ -388,7 +390,7 @@ const DB = (() => {
               mine: user ? c.user_id === user.id : false,
               likeCount: (c.comment_likes ?? []).length,
               likedByMe: user ? (c.comment_likes ?? []).some((l) => l.user_id === user.id) : false,
-              text: c.body, createdAt: c.created_at, parentId: c.parent_id,
+              text: c.body, audio: c.audio_url, createdAt: c.created_at, parentId: c.parent_id,
             }));
           return {
             id: p.id,
@@ -399,6 +401,7 @@ const DB = (() => {
             text: p.body,
             image: p.image_url,
             createdAt: p.created_at,
+            editedAt: p.edited_at || null,
             mine: user ? p.user_id === user.id : false,
             reactions,
             myReaction: user ? (p.likes.find((l) => l.user_id === user.id)?.reaction ?? null) : null,
@@ -441,6 +444,18 @@ const DB = (() => {
       }
       const posts = LS.read("ch_posts", []).filter((p) => p.id !== postId);
       LS.write("ch_posts", posts);
+    },
+
+    async editPost(postId, text) {
+      if (useSupabase) {
+        const { error } = await sb.from("posts")
+          .update({ body: text, edited_at: new Date().toISOString() }).eq("id", postId);
+        if (error) throw new Error(error.message);
+        return;
+      }
+      const posts = LS.read("ch_posts", []);
+      const post = posts.find((p) => p.id === postId);
+      if (post) { post.text = text; post.editedAt = now(); LS.write("ch_posts", posts); }
     },
 
     async createPost({ text, category, image }) {
@@ -491,11 +506,19 @@ const DB = (() => {
       LS.write("ch_posts", posts);
     },
 
-    async addComment(postId, text, parentId = null) {
+    async addComment(postId, text, parentId = null, audio = null) {
       if (useSupabase) {
         const { data: { user } } = await sb.auth.getUser();
+        let audio_url = null;
+        if (audio) {
+          const path = `${user.id}/voice-${Date.now()}.webm`;
+          const { error: upErr } = await sb.storage.from("photos")
+            .upload(path, audio, { contentType: "audio/webm" });
+          if (upErr) throw new Error(upErr.message);
+          audio_url = sb.storage.from("photos").getPublicUrl(path).data.publicUrl;
+        }
         const { error } = await sb.from("comments")
-          .insert({ post_id: postId, user_id: user.id, body: text, parent_id: parentId });
+          .insert({ post_id: postId, user_id: user.id, body: text, parent_id: parentId, audio_url });
         if (error) throw new Error(error.message);
         return;
       }
@@ -503,7 +526,7 @@ const DB = (() => {
       const posts = LS.read("ch_posts", []);
       const post = posts.find((p) => p.id === postId);
       if (!post) return;
-      post.comments.push({ id: uid(), author: me.name, authorAvatar: me.avatar || null, text, createdAt: now(), parentId, likes: [] });
+      post.comments.push({ id: uid(), author: me.name, authorAvatar: me.avatar || null, text, audio: audio || null, createdAt: now(), parentId, likes: [] });
       LS.write("ch_posts", posts);
     },
 
@@ -564,6 +587,7 @@ const DB = (() => {
         const { data, error } = await sb.from("messages")
           .select("*, profiles!messages_user_id_fkey(display_name, avatar_url), message_reactions(user_id, reaction)")
           .order("created_at", { ascending: true }).limit(200);
+        // (image_url and audio_url come through via *)
         if (error) throw new Error(error.message);
         const { data: { user } } = await sb.auth.getUser();
         const byId = {};
@@ -577,7 +601,7 @@ const DB = (() => {
             id: m.id, author: m.profiles?.display_name ?? "Member",
             authorAvatar: m.profiles?.avatar_url ?? null,
             mine: user ? m.user_id === user.id : false,
-            text: m.body, image: m.image_url, createdAt: m.created_at,
+            text: m.body, image: m.image_url, audio: m.audio_url, createdAt: m.created_at,
             parentId: m.parent_id,
             replyTo: m.parent_id ? byId[m.parent_id] ?? null : null,
             reactions,
@@ -605,24 +629,30 @@ const DB = (() => {
       });
     },
 
-    async sendMessage(text, parentId = null, image = null) {
+    async sendMessage(text, parentId = null, image = null, audio = null) {
       if (useSupabase) {
         const { data: { user } } = await sb.auth.getUser();
-        let image_url = null;
+        let image_url = null, audio_url = null;
         if (image) {
           const path = `${user.id}/chat-${Date.now()}.jpg`;
           const { error: upErr } = await sb.storage.from("photos").upload(path, image);
           if (upErr) throw new Error(upErr.message);
           image_url = sb.storage.from("photos").getPublicUrl(path).data.publicUrl;
         }
+        if (audio) {
+          const path = `${user.id}/voice-${Date.now()}.webm`;
+          const { error: upErr } = await sb.storage.from("photos").upload(path, audio, { contentType: "audio/webm" });
+          if (upErr) throw new Error(upErr.message);
+          audio_url = sb.storage.from("photos").getPublicUrl(path).data.publicUrl;
+        }
         const { error } = await sb.from("messages")
-          .insert({ user_id: user.id, body: text, parent_id: parentId, image_url });
+          .insert({ user_id: user.id, body: text, parent_id: parentId, image_url, audio_url });
         if (error) throw new Error(error.message);
         return;
       }
       const me = LS.read("ch_user", {});
       const msgs = LS.read("ch_messages", []);
-      msgs.push({ id: uid(), author: me.name, authorAvatar: me.avatar || null, text, image: image || null, createdAt: now(), parentId, reactions: [] });
+      msgs.push({ id: uid(), author: me.name, authorAvatar: me.avatar || null, text, image: image || null, audio: audio || null, createdAt: now(), parentId, reactions: [] });
       LS.write("ch_messages", msgs);
     },
 
