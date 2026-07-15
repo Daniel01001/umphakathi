@@ -56,6 +56,11 @@ const DB = (() => {
 
   const uid = () => Math.random().toString(36).slice(2, 10);
   const now = () => new Date().toISOString();
+
+  // Demo data stored likes as plain names before reactions existed —
+  // treat those as a 👍 so old posts keep their counts.
+  const normLikes = (likes) =>
+    (likes ?? []).map((l) => (typeof l === "string" ? { name: l, reaction: "👍" } : l));
   const minsAgo = (m) => new Date(Date.now() - m * 60000).toISOString();
 
   function seedDemoData() {
@@ -283,35 +288,59 @@ const DB = (() => {
 
     async getPosts() {
       if (useSupabase) {
+        // NOTE: posts relate to profiles two ways (author + via likes), so the
+        // author join must name its foreign key or PostgREST refuses (error 300).
         const { data, error } = await sb.from("posts")
-          .select("*, profiles(display_name, area), likes(user_id), comments(id, body, created_at, profiles(display_name))")
+          .select("*, profiles!posts_user_id_fkey(display_name, area), likes(user_id, reaction), comments(id, body, created_at, parent_id, profiles!comments_user_id_fkey(display_name))")
           .order("created_at", { ascending: false }).limit(100);
         if (error) throw new Error(error.message);
         const { data: { user } } = await sb.auth.getUser();
-        return data.map((p) => ({
-          id: p.id,
-          author: p.profiles?.display_name ?? "Member",
-          area: p.profiles?.area ?? "",
-          category: p.category,
-          text: p.body,
-          image: p.image_url,
-          createdAt: p.created_at,
-          likeCount: p.likes.length,
-          likedByMe: user ? p.likes.some((l) => l.user_id === user.id) : false,
-          comments: (p.comments ?? [])
+        return data.map((p) => {
+          const reactions = {};
+          for (const l of p.likes) {
+            const r = l.reaction || "👍";
+            reactions[r] = (reactions[r] || 0) + 1;
+          }
+          const flat = (p.comments ?? [])
             .sort((a, b) => a.created_at.localeCompare(b.created_at))
-            .map((c) => ({ id: c.id, author: c.profiles?.display_name ?? "Member", text: c.body, createdAt: c.created_at })),
-        }));
+            .map((c) => ({
+              id: c.id, author: c.profiles?.display_name ?? "Member",
+              text: c.body, createdAt: c.created_at, parentId: c.parent_id,
+            }));
+          return {
+            id: p.id,
+            author: p.profiles?.display_name ?? "Member",
+            area: p.profiles?.area ?? "",
+            category: p.category,
+            text: p.body,
+            image: p.image_url,
+            createdAt: p.created_at,
+            reactions,
+            myReaction: user ? (p.likes.find((l) => l.user_id === user.id)?.reaction ?? null) : null,
+            commentCount: flat.length,
+            comments: flat.filter((c) => !c.parentId)
+              .map((c) => ({ ...c, replies: flat.filter((r) => r.parentId === c.id) })),
+          };
+        });
       }
       const me = LS.read("ch_user", {});
       return LS.read("ch_posts", [])
         .slice()
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-        .map((p) => ({
-          ...p,
-          likeCount: p.likes.length,
-          likedByMe: p.likes.includes(me.name),
-        }));
+        .map((p) => {
+          const likes = normLikes(p.likes);
+          const reactions = {};
+          for (const l of likes) reactions[l.reaction] = (reactions[l.reaction] || 0) + 1;
+          const flat = (p.comments ?? []).map((c) => ({ ...c, parentId: c.parentId ?? null }));
+          return {
+            ...p,
+            reactions,
+            myReaction: likes.find((l) => l.name === me.name)?.reaction ?? null,
+            commentCount: flat.length,
+            comments: flat.filter((c) => !c.parentId)
+              .map((c) => ({ ...c, replies: flat.filter((r) => r.parentId === c.id) })),
+          };
+        });
     },
 
     async createPost({ text, category, image }) {
@@ -338,28 +367,17 @@ const DB = (() => {
       LS.write("ch_posts", posts);
     },
 
-    async toggleLike(postId) {
+    // Set (or change) my emoji reaction on a post; pass null to remove it.
+    // The likes table allows one row per member per post, so a change is an upsert.
+    async setReaction(postId, emoji) {
       if (useSupabase) {
         const { data: { user } } = await sb.auth.getUser();
-        const { data: existing } = await sb.from("likes")
-          .select("post_id").eq("post_id", postId).eq("user_id", user.id).maybeSingle();
-        if (existing) await sb.from("likes").delete().eq("post_id", postId).eq("user_id", user.id);
-        else await sb.from("likes").insert({ post_id: postId, user_id: user.id });
-        return;
-      }
-      const me = LS.read("ch_user", {});
-      const posts = LS.read("ch_posts", []);
-      const post = posts.find((p) => p.id === postId);
-      if (!post) return;
-      const i = post.likes.indexOf(me.name);
-      if (i >= 0) post.likes.splice(i, 1); else post.likes.push(me.name);
-      LS.write("ch_posts", posts);
-    },
-
-    async addComment(postId, text) {
-      if (useSupabase) {
-        const { data: { user } } = await sb.auth.getUser();
-        const { error } = await sb.from("comments").insert({ post_id: postId, user_id: user.id, body: text });
+        if (!emoji) {
+          await sb.from("likes").delete().eq("post_id", postId).eq("user_id", user.id);
+          return;
+        }
+        const { error } = await sb.from("likes")
+          .upsert({ post_id: postId, user_id: user.id, reaction: emoji }, { onConflict: "post_id,user_id" });
         if (error) throw new Error(error.message);
         return;
       }
@@ -367,7 +385,24 @@ const DB = (() => {
       const posts = LS.read("ch_posts", []);
       const post = posts.find((p) => p.id === postId);
       if (!post) return;
-      post.comments.push({ id: uid(), author: me.name, text, createdAt: now() });
+      post.likes = normLikes(post.likes).filter((l) => l.name !== me.name);
+      if (emoji) post.likes.push({ name: me.name, reaction: emoji });
+      LS.write("ch_posts", posts);
+    },
+
+    async addComment(postId, text, parentId = null) {
+      if (useSupabase) {
+        const { data: { user } } = await sb.auth.getUser();
+        const { error } = await sb.from("comments")
+          .insert({ post_id: postId, user_id: user.id, body: text, parent_id: parentId });
+        if (error) throw new Error(error.message);
+        return;
+      }
+      const me = LS.read("ch_user", {});
+      const posts = LS.read("ch_posts", []);
+      const post = posts.find((p) => p.id === postId);
+      if (!post) return;
+      post.comments.push({ id: uid(), author: me.name, text, createdAt: now(), parentId });
       LS.write("ch_posts", posts);
     },
 

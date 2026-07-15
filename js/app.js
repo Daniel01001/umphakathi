@@ -119,8 +119,16 @@
     });
   }
 
+  // Members see Sign in first (returning is the common case);
+  // joining is one tap away. Demo mode has no accounts, so it keeps the join form.
+  function renderAuthLanding() {
+    if (DB.mode === "supabase") renderSignIn();
+    else renderWelcome();
+  }
+
   // Step 2 of SMS sign-up: the code arrives on the member's phone.
   function renderOtp(details) {
+    document.body.classList.add("no-chrome");
     view.innerHTML = `
       <div class="welcome">
         <div class="welcome-hero">
@@ -163,6 +171,7 @@
 
   // "Forgot PIN": an SMS code proves it's really them, then they pick a new PIN.
   function renderForgotPin() {
+    document.body.classList.add("no-chrome");
     view.innerHTML = `
       <div class="welcome">
         <div class="welcome-hero">
@@ -217,11 +226,14 @@
   }
 
   function renderSignIn() {
+    document.body.classList.add("no-chrome");
     view.innerHTML = `
       <div class="welcome">
         <div class="welcome-hero">
           <div class="welcome-mark">${esc(CONFIG.APP_NAME[0])}</div>
-          <h1>Welcome back</h1>
+          <h1>${esc(CONFIG.APP_NAME)}</h1>
+          <p class="welcome-tag">${esc(CONFIG.TAGLINE)}</p>
+          <p class="welcome-sub">Sawubona! 👋 Sign in with your phone number.</p>
         </div>
         <form class="welcome-form" id="signInForm">
           <label>Phone number <input type="tel" id="siPhone" placeholder="e.g. 071 234 5678" required /></label>
@@ -281,10 +293,20 @@
     view.querySelectorAll("[data-filter]").forEach((b) =>
       b.addEventListener("click", () => { feedFilter = b.dataset.filter; renderFeed(); }));
 
-    // like buttons
-    view.querySelectorAll("[data-like]").forEach((b) =>
+    // react button opens the emoji picker (tap again to close)
+    view.querySelectorAll("[data-react-toggle]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const picker = b.parentElement.querySelector(".react-picker");
+        const wasHidden = picker.hidden;
+        view.querySelectorAll(".react-picker").forEach((p) => (p.hidden = true));
+        picker.hidden = !wasHidden;
+      }));
+
+    // choosing an emoji sets my reaction; choosing my current one removes it
+    view.querySelectorAll("[data-react]").forEach((b) =>
       b.addEventListener("click", async () => {
-        await DB.toggleLike(b.dataset.like);
+        const removing = b.classList.contains("react-current");
+        await DB.setReaction(b.dataset.react, removing ? null : b.dataset.emoji);
         renderFeed();
       }));
 
@@ -293,23 +315,33 @@
       b.addEventListener("click", () => {
         const box = $(`#comments-${b.dataset.comments}`, view);
         box.hidden = !box.hidden;
-        if (!box.hidden) $("input", box)?.focus();
+        if (!box.hidden) $(".comment-form:not(.reply-form) input", box)?.focus();
       }));
 
-    // comment forms
+    // "Reply" shows the inline reply box under that comment
+    view.querySelectorAll("[data-reply]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const form = $(`#reply-${b.dataset.reply}`, view);
+        form.hidden = !form.hidden;
+        if (!form.hidden) $("input", form).focus();
+      }));
+
+    // comment + reply forms (a reply carries the parent comment's id)
     view.querySelectorAll("form[data-comment-form]").forEach((f) =>
       f.addEventListener("submit", async (e) => {
         e.preventDefault();
         const input = $("input", f);
         const text = input.value.trim();
         if (!text) return;
-        await DB.addComment(f.dataset.commentForm, text);
+        await DB.addComment(f.dataset.commentForm, text, f.dataset.parent || null);
         renderFeed();
       }));
   }
 
   function postCard(p) {
     const cat = catInfo(p.category);
+    const reactEntries = Object.entries(p.reactions).sort((a, b) => b[1] - a[1]);
+    const reactTotal = reactEntries.reduce((sum, [, n]) => sum + n, 0);
     return `
       <article class="card post">
         <header class="post-head">
@@ -322,29 +354,61 @@
         </header>
         <p class="post-text">${esc(p.text)}</p>
         ${p.image ? `<img class="post-img" src="${esc(p.image)}" alt="Photo shared by ${esc(p.author)}" loading="lazy" />` : ""}
+        ${reactTotal ? `
+        <div class="react-summary">
+          <span class="react-faces">${reactEntries.slice(0, 3).map(([e]) => e).join("")}</span> ${reactTotal}
+          <span class="react-comments-count">${p.commentCount ? `${p.commentCount} comment${p.commentCount > 1 ? "s" : ""}` : ""}</span>
+        </div>` : ""}
         <footer class="post-actions">
-          <button class="action ${p.likedByMe ? "action-on" : ""}" data-like="${esc(p.id)}">
-            👍 <span>${p.likeCount || ""}</span> Like
-          </button>
+          <div class="react-wrap">
+            <button class="action ${p.myReaction ? "action-on" : ""}" data-react-toggle="${esc(p.id)}">
+              ${p.myReaction ?? "👍"} ${p.myReaction ? "You" : "React"}
+            </button>
+            <div class="react-picker" hidden>
+              ${CONFIG.REACTIONS.map((e) => `
+                <button class="react-emoji ${p.myReaction === e ? "react-current" : ""}"
+                  data-react="${esc(p.id)}" data-emoji="${e}" title="React ${e}">${e}</button>`).join("")}
+            </div>
+          </div>
           <button class="action" data-comments="${esc(p.id)}">
-            💬 <span>${p.comments.length || ""}</span> Comment
+            💬 <span>${p.commentCount || ""}</span> Comment
           </button>
         </footer>
         <div class="comments" id="comments-${esc(p.id)}" ${p.comments.length ? "" : "hidden"}>
-          ${p.comments.map((c) => `
-            <div class="comment">
-              <span class="avatar avatar-sm">${esc(initials(c.author))}</span>
-              <div class="comment-bubble">
-                <span class="comment-author">${esc(c.author)}</span>
-                ${esc(c.text)}
-              </div>
-            </div>`).join("")}
+          ${p.comments.map((c) => commentHtml(p.id, c)).join("")}
           <form class="comment-form" data-comment-form="${esc(p.id)}">
             <input type="text" placeholder="Write a comment…" maxlength="500" />
             <button type="submit" class="btn-mini">Send</button>
           </form>
         </div>
       </article>`;
+  }
+
+  function commentHtml(postId, c) {
+    return `
+      <div class="comment">
+        <span class="avatar avatar-sm">${esc(initials(c.author))}</span>
+        <div class="comment-body">
+          <div class="comment-bubble">
+            <span class="comment-author">${esc(c.author)}</span>
+            ${esc(c.text)}
+          </div>
+          <button class="comment-reply-btn" data-reply="${esc(c.id)}">Reply</button>
+          ${(c.replies ?? []).map((r) => `
+            <div class="comment comment-nested">
+              <span class="avatar avatar-sm">${esc(initials(r.author))}</span>
+              <div class="comment-bubble">
+                <span class="comment-author">${esc(r.author)}</span>
+                ${esc(r.text)}
+              </div>
+            </div>`).join("")}
+          <form class="comment-form reply-form" data-comment-form="${esc(postId)}"
+            data-parent="${esc(c.id)}" id="reply-${esc(c.id)}" hidden>
+            <input type="text" placeholder="Reply to ${esc(c.author.split(" ")[0])}…" maxlength="500" />
+            <button type="submit" class="btn-mini">Send</button>
+          </form>
+        </div>
+      </div>`;
   }
 
   /* ---------------- composer modal ---------------- */
@@ -566,7 +630,8 @@
     $("#signOutBtn").addEventListener("click", async () => {
       await DB.signOut();
       me = null;
-      renderWelcome();
+      $("#topAvatar").textContent = "?";
+      renderAuthLanding();
     });
   }
 
@@ -722,7 +787,11 @@
     // Refresh chat live when someone else sends a message (Supabase mode).
     DB.onNewMessage(() => { if (currentView === "chat") renderChat(); });
 
-    me = await DB.currentUser();
-    if (me) enterApp(); else renderWelcome();
+    try {
+      me = await DB.currentUser();
+    } catch {
+      me = null; // e.g. network hiccup during session restore
+    }
+    if (me) enterApp(); else renderAuthLanding();
   })();
 })();

@@ -9,7 +9,7 @@
    pick up the new version.
    ============================================================ */
 
-const CACHE_VERSION = "umphakathi-v1";
+const CACHE_VERSION = "umphakathi-v2";
 const SHELL = [
   "./",
   "./index.html",
