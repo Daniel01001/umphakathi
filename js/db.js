@@ -176,8 +176,11 @@ const DB = (() => {
           .subscribe();
         // Realtime for 1-on-1 DMs (RLS ensures we only receive our own).
         sb.channel("dms")
-          .on("postgres_changes", { event: "INSERT", schema: "public", table: "direct_messages" }, (payload) => {
-            if (onDmCallback) onDmCallback(payload.new);
+          .on("postgres_changes", { event: "*", schema: "public", table: "direct_messages" }, (payload) => {
+            if (onDmCallback) onDmCallback(payload.new || { refreshDm: true });
+          })
+          .on("postgres_changes", { event: "*", schema: "public", table: "direct_message_reactions" }, () => {
+            if (onDmCallback) onDmCallback({ refreshDm: true });
           })
           .subscribe();
       } else {
@@ -790,22 +793,85 @@ const DB = (() => {
       if (useSupabase) {
         const { data: { user } } = await sb.auth.getUser();
         const { data, error } = await sb.from("direct_messages")
-          .select("*")
+          .select("*, direct_message_reactions(user_id, reaction)")
           .or(`and(sender_id.eq.${user.id},recipient_id.eq.${partnerId}),and(sender_id.eq.${partnerId},recipient_id.eq.${user.id})`)
           .order("created_at", { ascending: true }).limit(500);
         if (error) throw new Error(error.message);
-        return data.map((m) => ({
-          id: m.id, mine: m.sender_id === user.id,
-          text: m.body, image: m.image_url, audio: m.audio_url, createdAt: m.created_at,
-        }));
+        const byId = {};
+        data.forEach((m) => (byId[m.id] = { text: m.body, mine: m.sender_id === user.id }));
+        return data.map((m) => {
+          const reactions = {};
+          for (const r of m.direct_message_reactions ?? []) reactions[r.reaction] = (reactions[r.reaction] || 0) + 1;
+          const parent = m.parent_id ? byId[m.parent_id] : null;
+          return {
+            id: m.id, mine: m.sender_id === user.id,
+            text: m.body, image: m.image_url, audio: m.audio_url, createdAt: m.created_at,
+            editedAt: m.edited_at || null, parentId: m.parent_id,
+            replyTo: parent ? { author: parent.mine ? "You" : null, text: parent.text } : null,
+            reactions,
+            myReaction: m.direct_message_reactions?.find((r) => r.user_id === user.id)?.reaction ?? null,
+          };
+        });
       }
       const meName = LS.read("ch_user", {}).name;
-      return LS.read("ch_dms", [])
+      const all = LS.read("ch_dms", []);
+      const byId = {};
+      all.forEach((m) => (byId[m.id] = { text: m.body, mine: m.senderId === meName }));
+      return all
         .filter((m) => (m.senderId === meName && m.recipientId === partnerId) || (m.senderId === partnerId && m.recipientId === meName))
-        .map((m) => ({ id: m.id, mine: m.senderId === meName, text: m.body, image: m.image, audio: m.audio, createdAt: m.createdAt }));
+        .map((m) => {
+          const likes = normLikes(m.reactions);
+          const reactions = {};
+          for (const l of likes) reactions[l.reaction] = (reactions[l.reaction] || 0) + 1;
+          const parent = m.parentId ? byId[m.parentId] : null;
+          return {
+            id: m.id, mine: m.senderId === meName, text: m.body, image: m.image, audio: m.audio,
+            createdAt: m.createdAt, editedAt: m.editedAt || null, parentId: m.parentId,
+            replyTo: parent ? { author: parent.mine ? "You" : null, text: parent.text } : null,
+            reactions, myReaction: likes.find((l) => l.name === meName)?.reaction ?? null,
+          };
+        });
     },
 
-    async sendDirectMessage(partnerId, { text = "", image = null, audio = null } = {}) {
+    async setDirectMessageReaction(messageId, emoji) {
+      if (useSupabase) {
+        const { data: { user } } = await sb.auth.getUser();
+        if (!emoji) { await sb.from("direct_message_reactions").delete().eq("message_id", messageId).eq("user_id", user.id); return; }
+        const { error } = await sb.from("direct_message_reactions")
+          .upsert({ message_id: messageId, user_id: user.id, reaction: emoji }, { onConflict: "message_id,user_id" });
+        if (error) throw new Error(error.message);
+        return;
+      }
+      const meName = LS.read("ch_user", {}).name;
+      const dms = LS.read("ch_dms", []);
+      const m = dms.find((x) => x.id === messageId);
+      if (!m) return;
+      m.reactions = normLikes(m.reactions).filter((l) => l.name !== meName);
+      if (emoji) m.reactions.push({ name: meName, reaction: emoji });
+      LS.write("ch_dms", dms);
+    },
+
+    async editDirectMessage(messageId, text) {
+      if (useSupabase) {
+        const { error } = await sb.from("direct_messages").update({ body: text, edited_at: new Date().toISOString() }).eq("id", messageId);
+        if (error) throw new Error(error.message);
+        return;
+      }
+      const dms = LS.read("ch_dms", []);
+      const m = dms.find((x) => x.id === messageId);
+      if (m) { m.body = text; m.editedAt = now(); LS.write("ch_dms", dms); }
+    },
+
+    async deleteDirectMessage(messageId) {
+      if (useSupabase) {
+        const { error } = await sb.from("direct_messages").delete().eq("id", messageId);
+        if (error) throw new Error(error.message);
+        return;
+      }
+      LS.write("ch_dms", LS.read("ch_dms", []).filter((m) => m.id !== messageId));
+    },
+
+    async sendDirectMessage(partnerId, { text = "", image = null, audio = null, parentId = null } = {}) {
       if (useSupabase) {
         const { data: { user } } = await sb.auth.getUser();
         let image_url = null, audio_url = null;
@@ -822,13 +888,13 @@ const DB = (() => {
           audio_url = sb.storage.from("photos").getPublicUrl(path).data.publicUrl;
         }
         const { error } = await sb.from("direct_messages")
-          .insert({ sender_id: user.id, recipient_id: partnerId, body: text, image_url, audio_url });
+          .insert({ sender_id: user.id, recipient_id: partnerId, body: text, image_url, audio_url, parent_id: parentId });
         if (error) throw new Error(error.message);
         return;
       }
       const meName = LS.read("ch_user", {}).name;
       const dms = LS.read("ch_dms", []);
-      dms.push({ id: uid(), senderId: meName, recipientId: partnerId, body: text, image, audio, createdAt: now(), read: false });
+      dms.push({ id: uid(), senderId: meName, recipientId: partnerId, body: text, image, audio, parentId, createdAt: now(), read: false, reactions: [] });
       LS.write("ch_dms", dms);
     },
 
@@ -863,6 +929,35 @@ const DB = (() => {
         if (x.author && x.author !== meName && !seen[x.author]) seen[x.author] = { id: x.author, name: x.author, area: x.area || "", avatar: x.authorAvatar || null };
       }
       return Object.values(seen).sort((a, b) => a.name.localeCompare(b.name));
+    },
+
+    // Search across posts, people, and businesses. Server-side ilike so it
+    // scales past a few thousand members without downloading everything.
+    async search(q) {
+      const term = (q || "").trim();
+      if (term.length < 2) return { people: [], businesses: [], posts: [] };
+      if (useSupabase) {
+        const like = `%${term}%`;
+        const [people, businesses, posts] = await Promise.all([
+          sb.from("profiles").select("id, display_name, area, avatar_url").ilike("display_name", like).limit(15),
+          sb.from("businesses").select("*, profiles(display_name)").or(`name.ilike.${like},description.ilike.${like}`).limit(15),
+          sb.from("posts").select("id, body, created_at, profiles!posts_user_id_fkey(display_name, avatar_url)").ilike("body", like).order("created_at", { ascending: false }).limit(15),
+        ]);
+        return {
+          people: (people.data ?? []).map((p) => ({ id: p.id, name: p.display_name, area: p.area, avatar: p.avatar_url || null })),
+          businesses: (businesses.data ?? []).map((b) => ({ id: b.id, name: b.name, category: b.category, area: b.area, description: b.description, phone: b.phone, whatsapp: b.whatsapp })),
+          posts: (posts.data ?? []).map((p) => ({ id: p.id, author: p.profiles?.display_name ?? "Member", authorAvatar: p.profiles?.avatar_url ?? null, text: p.body, createdAt: p.created_at })),
+        };
+      }
+      const t = term.toLowerCase();
+      const meName = LS.read("ch_user", {}).name;
+      const members = await this.getAllMembers();
+      return {
+        people: members.filter((m) => m.name.toLowerCase().includes(t)),
+        businesses: LS.read("ch_businesses", []).filter((b) => (b.name + " " + (b.description || "")).toLowerCase().includes(t)),
+        posts: LS.read("ch_posts", []).filter((p) => (p.text || "").toLowerCase().includes(t))
+          .map((p) => ({ id: p.id, author: p.author, authorAvatar: p.authorAvatar || null, text: p.text, createdAt: p.createdAt })),
+      };
     },
 
     /* ---------------- Hide / block ---------------- */

@@ -17,7 +17,7 @@
   <meta name="mobile-web-app-capable" content="yes" />
 
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/styles.css?v=9" />
+  <link rel="stylesheet" href="css/styles.css?v=12" />
 </head>
 <body>
 
@@ -28,7 +28,8 @@
       <div class="topbar-right">
         <span class="mode-pill" id="modePill" hidden>Demo mode</span>
         <button class="install-btn" id="installBtn" hidden>⬇ Install app</button>
-        <button class="topbar-icon" id="dmIcon" title="Direct messages">✉️<span class="dm-badge" id="dmBadge" hidden></span></button>
+        <button class="topbar-icon" id="searchIcon" title="Search"><svg class="icon icon-sm" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></button>
+        <button class="topbar-icon" id="dmIcon" title="Direct messages"><svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M21 11.5a8.5 8.5 0 0 1-12.8 7.3L3.5 20.5l1.7-4.7A8.5 8.5 0 1 1 21 11.5Z"/></svg><span class="dm-badge" id="dmBadge" hidden></span></button>
         <button class="avatar-btn" id="topAvatar" data-nav="profile" title="My profile">?</button>
       </div>
     </div>
@@ -40,12 +41,12 @@
     <!-- LEFT: desktop sidebar navigation -->
     <aside class="leftrail" id="leftRail">
       <nav class="side-nav">
-        <button class="side-item active" data-nav="feed"><span class="side-icon">📰</span> Feed</button>
-        <button class="side-item" data-nav="chat"><span class="side-icon">💬</span> Community chat</button>
-        <button class="side-item" data-nav="market"><span class="side-icon">🏪</span> Local businesses</button>
-        <button class="side-item" data-nav="profile"><span class="side-icon">👤</span> My profile</button>
+        <button class="side-item active" data-nav="feed"><svg class="icon side-icon" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h5v-6h4v6h5V9.5"/></svg> Feed</button>
+        <button class="side-item" data-nav="chat"><svg class="icon side-icon" viewBox="0 0 24 24"><path d="M21 11.5a8.5 8.5 0 0 1-12.8 7.3L3.5 20.5l1.7-4.7A8.5 8.5 0 1 1 21 11.5Z"/></svg> Community chat</button>
+        <button class="side-item" data-nav="market"><svg class="icon side-icon" viewBox="0 0 24 24"><path d="M4 9.5 5.2 5h13.6L20 9.5"/><path d="M4 9.5a2.2 2.2 0 0 0 4 0 2.2 2.2 0 0 0 4 0 2.2 2.2 0 0 0 4 0 2.2 2.2 0 0 0 4 0"/><path d="M5 11v9h14v-9"/><path d="M10 20v-5h4v5"/></svg> Local businesses</button>
+        <button class="side-item" data-nav="profile"><svg class="icon side-icon" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4.5 20.5a7.5 7.5 0 0 1 15 0"/></svg> My profile</button>
       </nav>
-      <button class="btn-primary btn-block side-post" data-action="compose">＋ New post</button>
+      <button class="btn-primary btn-block side-post" data-action="compose"><svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg> New post</button>
       <div class="side-foot" id="sideFoot"></div>
     </aside>
 
@@ -60,19 +61,19 @@
   <!-- Bottom navigation (mobile only) -->
   <nav class="bottomnav" id="bottomNav">
     <button class="nav-item active" data-nav="feed">
-      <span class="nav-icon">📰</span><span class="nav-label">Feed</span>
+      <svg class="icon nav-icon" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h5v-6h4v6h5V9.5"/></svg><span class="nav-label">Feed</span>
     </button>
     <button class="nav-item" data-nav="chat">
-      <span class="nav-icon">💬</span><span class="nav-label">Chat</span>
+      <svg class="icon nav-icon" viewBox="0 0 24 24"><path d="M21 11.5a8.5 8.5 0 0 1-12.8 7.3L3.5 20.5l1.7-4.7A8.5 8.5 0 1 1 21 11.5Z"/></svg><span class="nav-label">Chat</span>
     </button>
     <button class="nav-item nav-post" data-action="compose" title="New post">
-      <span class="nav-post-icon">＋</span>
+      <span class="nav-post-icon"><svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>
     </button>
     <button class="nav-item" data-nav="market">
-      <span class="nav-icon">🏪</span><span class="nav-label">Business</span>
+      <svg class="icon nav-icon" viewBox="0 0 24 24"><path d="M4 9.5 5.2 5h13.6L20 9.5"/><path d="M4 9.5a2.2 2.2 0 0 0 4 0 2.2 2.2 0 0 0 4 0 2.2 2.2 0 0 0 4 0 2.2 2.2 0 0 0 4 0"/><path d="M5 11v9h14v-9"/><path d="M10 20v-5h4v5"/></svg><span class="nav-label">Business</span>
     </button>
     <button class="nav-item" data-nav="profile">
-      <span class="nav-icon">👤</span><span class="nav-label">Me</span>
+      <svg class="icon nav-icon" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4.5 20.5a7.5 7.5 0 0 1 15 0"/></svg><span class="nav-label">Me</span>
     </button>
   </nav>
 
@@ -85,9 +86,9 @@
   <div class="toast" id="toast" hidden></div>
 
   <!-- Bump ?v= when you change any JS/CSS so phones fetch the new version. -->
-  <script src="js/config.js?v=9"></script>
-  <script src="js/db.js?v=9"></script>
-  <script src="js/app.js?v=9"></script>
+  <script src="js/config.js?v=12"></script>
+  <script src="js/db.js?v=12"></script>
+  <script src="js/app.js?v=12"></script>
   <script>
     // Register the service worker (PWA install + offline). Ignored on file://.
     if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {

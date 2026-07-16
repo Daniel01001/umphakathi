@@ -10,6 +10,18 @@
   const modalBackdrop = $("#modalBackdrop");
   const modalBody = $("#modalBody");
 
+  // Theme: 'auto' follows the phone; 'light'/'dark' force it. Applied early.
+  function applyTheme(pref) {
+    pref = pref || localStorage.getItem("ch_theme") || "auto";
+    if (pref === "auto") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", pref);
+    localStorage.setItem("ch_theme", pref);
+    // keep the mobile browser chrome in step with the theme
+    const dark = pref === "dark" || (pref === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#101311" : "#14563a");
+  }
+  applyTheme();
+
   let me = null;            // current user {name, area, ...}
   let currentView = "feed";
   let feedFilter = "all";
@@ -20,6 +32,7 @@
   let typingBroadcastTimer = null;
   let feedDirty = false;    // a popup changed comments — refresh feed on close
   let chatImage = null;     // pending chat attachment (data URL / File)
+  let dmReplyTo = null;     // message being replied to in a 1-on-1 chat
 
   /* ---------------- helpers ---------------- */
 
@@ -293,7 +306,26 @@
 
   /* ---------------- feed ---------------- */
 
+  const skeletonPost = () => `
+    <div class="skel-post">
+      <div class="skel-head">
+        <div class="skel-dot skeleton"></div>
+        <div style="flex:1">
+          <div class="skel-line skeleton" style="width:40%"></div>
+          <div class="skel-line skeleton" style="width:25%;margin-top:7px"></div>
+        </div>
+      </div>
+      <div class="skel-line skeleton" style="width:92%"></div>
+      <div class="skel-line skeleton" style="width:78%;margin-top:8px"></div>
+    </div>`;
+
   async function renderFeed() {
+    // show a skeleton immediately so there's no blank flash while data loads
+    if (!view.querySelector(".feed")) {
+      view.innerHTML = `<div class="feed">
+        <div class="skel-stories">${Array(5).fill('<div class="skel-ring skeleton"></div>').join("")}</div>
+        ${skeletonPost()}${skeletonPost()}${skeletonPost()}</div>`;
+    }
     const [posts, storyGroups] = await Promise.all([DB.getPosts(), DB.getStories().catch(() => [])]);
     const filtered = feedFilter === "all" ? posts : posts.filter((p) => p.category === feedFilter);
     const myId = await DB.myId();
@@ -1220,6 +1252,14 @@
             <label class="switch"><input type="checkbox" id="pushToggle" /><span class="slider"></span></label>
           </div>
           <p class="account-hint" id="pushHint"></p>` : ""}
+          <div class="account-row account-toggle">
+            <span>🌗 Appearance</span>
+            <div class="seg" id="themeSeg">
+              <button data-theme-pref="auto">Auto</button>
+              <button data-theme-pref="light">Light</button>
+              <button data-theme-pref="dark">Dark</button>
+            </div>
+          </div>
         </div>
 
         <div class="card about-card">
@@ -1233,6 +1273,16 @@
 
         <button class="btn-outline btn-block" id="signOutBtn">Sign out</button>
       </div>`;
+
+    // appearance segmented control
+    const themePref = localStorage.getItem("ch_theme") || "auto";
+    view.querySelectorAll("[data-theme-pref]").forEach((b) => {
+      b.classList.toggle("seg-on", b.dataset.themePref === themePref);
+      b.addEventListener("click", () => {
+        applyTheme(b.dataset.themePref);
+        view.querySelectorAll("[data-theme-pref]").forEach((x) => x.classList.toggle("seg-on", x === b));
+      });
+    });
 
     $("#myProfileBtn").addEventListener("click", async () => openMember(await DB.myId()));
     $("#dmListBtn").addEventListener("click", renderDMList);
@@ -1307,26 +1357,51 @@
 
   // Wire a mic button that records on first tap and sends on second tap.
   // `send(audio)` receives a data-URL (demo) or Blob (live). `onState` toggles UI.
-  function wireMic(btn, send, onState) {
+  function wireMic(btn, send) {
     if (!btn) return;
     if (!Voice.supported()) { btn.style.display = "none"; return; }
-    btn.addEventListener("click", async () => {
-      if (Voice.active) {
-        const blob = await Voice.stop();
-        onState?.(false);
-        if (!blob || blob.size < 400) return; // ignore empty taps
-        try {
-          const audio = DB.mode === "demo" ? await fileToDataUrl(blob) : blob;
-          await send(audio);
-        } catch (err) { toast(err.message); }
-        return;
-      }
-      try {
-        await Voice.start();
-        onState?.(true);
-      } catch {
-        toast("Couldn't access the microphone. Allow mic access to send voice notes.");
-      }
+    btn.addEventListener("click", () => recordVoice(send));
+  }
+
+  // Recording bar: shows a live timer while recording, then a playable preview
+  // so you can listen before sending.
+  async function recordVoice(send) {
+    if (document.querySelector(".rec-bar")) return; // one at a time
+    try { await Voice.start(); }
+    catch { toast("Couldn't access the microphone. Allow mic access to send voice notes."); return; }
+
+    const bar = document.createElement("div");
+    bar.className = "rec-bar";
+    document.body.appendChild(bar);
+    let secs = 0;
+    const fmt = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    bar.innerHTML = `
+      <button class="rec-btn rec-cancel" title="Cancel">🗑</button>
+      <span class="rec-dot"></span>
+      <span class="rec-time">0:00</span>
+      <span class="rec-hint">Recording…</span>
+      <button class="rec-btn rec-stop">■ Stop</button>`;
+    const timer = setInterval(() => { secs++; bar.querySelector(".rec-time").textContent = fmt(secs); }, 1000);
+    const cleanup = () => { clearInterval(timer); bar.remove(); };
+
+    bar.querySelector(".rec-cancel").addEventListener("click", () => { Voice.cancel(); cleanup(); });
+    bar.querySelector(".rec-stop").addEventListener("click", async () => {
+      clearInterval(timer);
+      const blob = await Voice.stop();
+      if (!blob || blob.size < 400) { cleanup(); return; }
+      const url = URL.createObjectURL(blob);
+      // preview state — listen before sending
+      bar.innerHTML = `
+        <button class="rec-btn rec-cancel" title="Discard">🗑</button>
+        <audio class="rec-audio" controls src="${url}"></audio>
+        <span class="rec-len">${fmt(secs)}</span>
+        <button class="rec-btn rec-send">Send ➤</button>`;
+      bar.querySelector(".rec-cancel").addEventListener("click", cleanup);
+      bar.querySelector(".rec-send").addEventListener("click", async () => {
+        const audio = DB.mode === "demo" ? await fileToDataUrl(blob) : blob;
+        cleanup();
+        try { await send(audio); } catch (err) { toast(err.message); }
+      });
     });
   }
 
@@ -1608,6 +1683,7 @@
       ? `<div class="dm-barrier">You can't message this person.</div>`
       : "";
     const composer = (iBlocked || theyBlocked) ? "" : `
+        <div class="reply-bar" id="dmReplyBar" hidden></div>
         <div class="attach-preview" id="attachPreview" hidden></div>
         <form class="chat-form" id="dmForm">
           <label class="chat-attach" title="Send a photo">📎<input type="file" id="dmPhoto" accept="image/*" hidden /></label>
@@ -1630,10 +1706,40 @@
         ${composer}
       </div>`;
     const scroll = $("#dmScroll"); scroll.scrollTop = scroll.scrollHeight;
-    $("[data-back]").addEventListener("click", () => renderDMList());
+    $("[data-back]").addEventListener("click", () => { dmReplyTo = null; renderDMList(); });
     $("#unblockBtn")?.addEventListener("click", async () => {
       await DB.setBlock(partnerId, false); toast("Unblocked"); openDM(partnerId, partnerName, partnerAvatar);
     });
+
+    const reopen = () => { if (currentView === "dm") openDM(partnerId, partnerName, partnerAvatar); };
+
+    // message menu: react / reply / edit / delete (parity with the big chat)
+    view.querySelectorAll("[data-dmmenu]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const menu = b.parentElement.querySelector(".msg-menu");
+        const wasHidden = menu.hidden;
+        view.querySelectorAll(".msg-menu").forEach((p) => (p.hidden = true));
+        menu.hidden = !wasHidden;
+      }));
+    view.querySelectorAll("[data-dmreact]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        await DB.setDirectMessageReaction(b.dataset.dmreact, b.classList.contains("react-current") ? null : b.dataset.emoji);
+        reopen();
+      }));
+    view.querySelectorAll("[data-dmreply]").forEach((b) =>
+      b.addEventListener("click", () => { setDmReply(b.dataset.dmreply, msgs); $("#dmInput")?.focus(); }));
+    view.querySelectorAll("[data-dmedit]").forEach((b) =>
+      b.addEventListener("click", () => openEditDM(b.dataset.dmedit, msgs, reopen)));
+    view.querySelectorAll("[data-dmdel]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        if (!confirm("Delete this message?")) return;
+        await DB.deleteDirectMessage(b.dataset.dmdel); reopen();
+      }));
+
+    // long-press to react, swipe left to reply
+    wireDmGestures(msgs);
+    updateDmReplyBar();
+
     if (composer) {
       $("#dmPhoto").addEventListener("change", async (e) => {
         const file = e.target.files[0]; if (!file) return;
@@ -1644,31 +1750,149 @@
         const input = $("#dmInput"); const text = input.value.trim();
         if (!text && !chatImage) return;
         const image = chatImage; input.value = ""; chatImage = null; updateAttachPreview();
-        try { await DB.sendDirectMessage(partnerId, { text, image }); }
+        const parentId = dmReplyTo?.id || null; dmReplyTo = null; updateDmReplyBar();
+        try { await DB.sendDirectMessage(partnerId, { text, image, parentId }); }
         catch (err) { toast(/row-level|policy/i.test(err.message) ? "You can't message this person." : err.message); }
-        if (currentView === "dm") openDM(partnerId, partnerName, partnerAvatar);
+        reopen();
       });
       wireMic($("#dmMic"), async (audio) => {
-        await DB.sendDirectMessage(partnerId, { audio });
-        if (currentView === "dm") openDM(partnerId, partnerName, partnerAvatar);
-      }, (rec) => { const m = $("#dmMic"); m.classList.toggle("recording", rec); m.textContent = rec ? "⏹" : "🎤"; });
+        const parentId = dmReplyTo?.id || null; dmReplyTo = null;
+        await DB.sendDirectMessage(partnerId, { audio, parentId });
+        reopen();
+      });
     }
     renderRightRail();
   }
 
+  function setDmReply(msgId, msgs) {
+    const m = msgs.find((x) => x.id === msgId);
+    dmReplyTo = m ? { id: m.id, text: m.text || "📷 Photo", mine: m.mine } : null;
+    updateDmReplyBar();
+  }
+  function updateDmReplyBar() {
+    const bar = $("#dmReplyBar");
+    if (!bar) return;
+    if (!dmReplyTo) { bar.hidden = true; bar.innerHTML = ""; return; }
+    bar.hidden = false;
+    bar.innerHTML = `<div class="reply-bar-inner"><span class="reply-bar-text">↩ Replying to ${dmReplyTo.mine ? "yourself" : "them"}: ${esc((dmReplyTo.text || "").slice(0, 50))}</span><button class="reply-bar-x" id="dmCancelReply">✕</button></div>`;
+    $("#dmCancelReply").addEventListener("click", () => { dmReplyTo = null; updateDmReplyBar(); });
+  }
+  function openEditDM(id, msgs, reopen) {
+    const m = msgs.find((x) => x.id === id);
+    if (!m) return;
+    openModal(`
+      <div class="modal-head"><h2>Edit message</h2><button class="modal-close" data-close>✕</button></div>
+      <form id="editDmForm" class="compose-form">
+        <textarea id="editDmText" rows="3" maxlength="1000" required>${esc(m.text || "")}</textarea>
+        <button type="submit" class="btn-primary btn-block">Save changes</button>
+      </form>`);
+    const ta = $("#editDmText"); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+    $("#editDmForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = $("#editDmText").value.trim(); if (!text) return;
+      try { await DB.editDirectMessage(id, text); closeModal(); reopen(); toast("Message updated"); }
+      catch (err) { toast(err.message); }
+    });
+  }
+  function wireDmGestures(msgs) {
+    view.querySelectorAll(".msg[data-dmid]").forEach((el) => {
+      const id = el.dataset.dmid;
+      let timer = null, startX = 0, startY = 0, moved = false;
+      const openMenu = () => {
+        const menu = el.querySelector(".msg-menu"); if (!menu) return;
+        view.querySelectorAll(".msg-menu").forEach((p) => (p.hidden = true));
+        menu.hidden = false;
+      };
+      el.addEventListener("pointerdown", (e) => { startX = e.clientX; startY = e.clientY; moved = false; timer = setTimeout(() => { timer = null; openMenu(); }, 450); });
+      el.addEventListener("pointermove", (e) => {
+        if (Math.abs(e.clientX - startX) > 8 || Math.abs(e.clientY - startY) > 8) { moved = true; if (timer) { clearTimeout(timer); timer = null; } }
+        const dx = e.clientX - startX;
+        if (dx < 0 && Math.abs(dx) > Math.abs(e.clientY - startY)) el.style.transform = `translateX(${Math.max(dx, -80)}px)`;
+      });
+      el.addEventListener("pointerup", (e) => {
+        if (timer) { clearTimeout(timer); timer = null; }
+        const dx = e.clientX - startX; el.style.transform = "";
+        if (moved && dx < -55 && Math.abs(dx) > Math.abs(e.clientY - startY)) { setDmReply(id, msgs); $("#dmInput")?.focus(); }
+      });
+      el.addEventListener("pointercancel", () => { if (timer) clearTimeout(timer); el.style.transform = ""; });
+    });
+  }
+
   function dmBubble(m) {
     const hhmm = new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const reactEntries = Object.entries(m.reactions || {}).sort((a, b) => b[1] - a[1]);
+    const reactTotal = reactEntries.reduce((s, [, n]) => s + n, 0);
+    const quoteLabel = m.replyTo ? (m.replyTo.author || (m.mine ? "Them" : "You")) : "";
     return `
-      <div class="msg ${m.mine ? "msg-mine" : ""}">
+      <div class="msg ${m.mine ? "msg-mine" : ""}" data-dmid="${esc(m.id)}">
         <div class="msg-col">
           <div class="msg-bubble">
+            ${m.replyTo ? `<div class="msg-quote"><span class="msg-quote-author">${esc(quoteLabel)}</span>${esc((m.replyTo.text || "").slice(0, 80))}</div>` : ""}
             ${m.image ? `<img class="msg-img" src="${esc(m.image)}" alt="Photo" loading="lazy" />` : ""}
             ${m.audio ? `<audio class="voice-player" controls src="${esc(m.audio)}"></audio>` : ""}
             ${m.text ? `<span class="msg-text">${esc(m.text)}</span>` : ""}
-            <span class="msg-time">${hhmm}</span>
+            <span class="msg-time">${hhmm}${m.editedAt ? " · edited" : ""}</span>
+            ${reactTotal ? `<span class="msg-reacts">${reactEntries.map(([e, n]) => `${e}${n > 1 ? ` ${n}` : ""}`).join("")}</span>` : ""}
+          </div>
+          <div class="msg-actions">
+            <button class="msg-act" data-dmmenu="${esc(m.id)}" title="Options">⋯</button>
+            <div class="msg-menu react-picker" hidden>
+              <div class="msg-menu-emojis">
+                ${CONFIG.REACTIONS.map((e) => `<button class="react-emoji ${m.myReaction === e ? "react-current" : ""}" data-dmreact="${esc(m.id)}" data-emoji="${e}">${e}</button>`).join("")}
+              </div>
+              <button class="msg-menu-item" data-dmreply="${esc(m.id)}">↩ Reply</button>
+              ${m.mine ? `
+                <button class="msg-menu-item" data-dmedit="${esc(m.id)}">✏️ Edit</button>
+                <button class="msg-menu-item danger" data-dmdel="${esc(m.id)}">🗑️ Delete</button>` : ""}
+            </div>
           </div>
         </div>
       </div>`;
+  }
+
+  /* ---------------- search ---------------- */
+
+  async function renderSearch() {
+    currentView = "search";
+    document.querySelectorAll(".bottomnav .nav-item[data-nav], .side-item").forEach((b) => b.classList.remove("active"));
+    view.innerHTML = `
+      <div class="subview">
+        <div class="subview-head search-head">
+          <button class="back-btn" data-back>←</button>
+          <input class="search-input" id="searchInput" placeholder="Search posts, people, businesses…" autocomplete="off" />
+        </div>
+        <div id="searchResults"><div class="empty">Type at least 2 letters to search.</div></div>
+      </div>`;
+    $("[data-back]").addEventListener("click", () => switchView("feed"));
+    const input = $("#searchInput"); input.focus();
+    let t;
+    input.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => runSearch(input.value), 250); });
+    renderRightRail();
+  }
+
+  async function runSearch(q) {
+    const box = $("#searchResults");
+    if (!box) return;
+    if ((q || "").trim().length < 2) { box.innerHTML = `<div class="empty">Type at least 2 letters to search.</div>`; return; }
+    box.innerHTML = `<div class="empty">Searching…</div>`;
+    let res;
+    try { res = await DB.search(q); } catch (err) { box.innerHTML = `<div class="empty">${esc(err.message)}</div>`; return; }
+    const { people, businesses, posts } = res;
+    if (!people.length && !businesses.length && !posts.length) {
+      box.innerHTML = `<div class="empty">No results for "${esc(q)}".</div>`; return;
+    }
+    const row = (attr, avatarName, avatarUrl, name, sub) => `
+      <button class="card convo-row" ${attr}>
+        ${avatarHtml(avatarName, avatarUrl)}
+        <div class="convo-meta"><div class="convo-name">${esc(name)}</div><div class="convo-last">${esc(sub)}</div></div>
+      </button>`;
+    box.innerHTML = `
+      ${people.length ? `<div class="dm-section-title">People</div>${people.map((p) => row(`data-member="${esc(p.id)}"`, p.name, p.avatar, p.name, p.area || "")).join("")}` : ""}
+      ${businesses.length ? `<div class="dm-section-title">Businesses</div>${businesses.map((b) => row(`data-bizsearch="${esc(b.id)}"`, b.name, null, b.name, `${b.category || ""}${b.area ? " · " + b.area : ""}`)).join("")}` : ""}
+      ${posts.length ? `<div class="dm-section-title">Posts</div>${posts.map((p) => row(`data-searchpost="${esc(p.id)}"`, p.author, p.authorAvatar, p.author, (p.text || "").slice(0, 55))).join("")}` : ""}`;
+    box.querySelectorAll("[data-searchpost]").forEach((b) => b.addEventListener("click", () => openCommentsModal(b.dataset.searchpost)));
+    box.querySelectorAll("[data-bizsearch]").forEach((b) => b.addEventListener("click", () => switchView("market")));
+    // people rows use data-member → handled by the global click handler
   }
 
   /* ---------------- navigation ---------------- */
@@ -1739,6 +1963,8 @@
     DB.onNewMessage(() => { if (currentView === "chat") renderChat(); });
     DB.onTyping(handleTyping);
     DB.onDirectMessage(async (dm) => {
+      // reaction/edit refresh (no new content) — just re-render the open thread
+      if (dm.refreshDm) { if (currentView === "dm" && dmPartner) openDM(dmPartner.id, dmPartner.name, dmPartner.avatar); return; }
       // hidden people's messages arrive but only pop up (no push, not in main list)
       const flags = await DB.getMyFlags().catch(() => ({}));
       const fromHidden = dm.sender_id && flags[dm.sender_id]?.hidden;
@@ -1752,8 +1978,9 @@
       refreshDmBadge();
     });
 
-    // Direct-messages icon in the top bar
+    // Top-bar icons
     $("#dmIcon").addEventListener("click", () => { if (me) renderDMList(); });
+    $("#searchIcon").addEventListener("click", () => { if (me) renderSearch(); });
 
     try {
       me = await DB.currentUser();
