@@ -17,7 +17,7 @@
   <meta name="mobile-web-app-capable" content="yes" />
 
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/styles.css?v=7" />
+  <link rel="stylesheet" href="css/styles.css?v=9" />
 </head>
 <body>
 
@@ -28,6 +28,7 @@
       <div class="topbar-right">
         <span class="mode-pill" id="modePill" hidden>Demo mode</span>
         <button class="install-btn" id="installBtn" hidden>⬇ Install app</button>
+        <button class="topbar-icon" id="dmIcon" title="Direct messages">✉️<span class="dm-badge" id="dmBadge" hidden></span></button>
         <button class="avatar-btn" id="topAvatar" data-nav="profile" title="My profile">?</button>
       </div>
     </div>
@@ -84,9 +85,9 @@
   <div class="toast" id="toast" hidden></div>
 
   <!-- Bump ?v= when you change any JS/CSS so phones fetch the new version. -->
-  <script src="js/config.js?v=7"></script>
-  <script src="js/db.js?v=7"></script>
-  <script src="js/app.js?v=7"></script>
+  <script src="js/config.js?v=9"></script>
+  <script src="js/db.js?v=9"></script>
+  <script src="js/app.js?v=9"></script>
   <script>
     // Register the service worker (PWA install + offline). Ignored on file://.
     if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {

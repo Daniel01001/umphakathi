@@ -23,6 +23,7 @@ const DB = (() => {
   let roomChannel = null;
   let onMessageCallback = null;
   let onTypingCallback = null;
+  let onDmCallback = null;
 
   /* ----------------------------------------------------------
      DEMO MODE — localStorage
@@ -171,6 +172,12 @@ const DB = (() => {
           })
           .on("broadcast", { event: "typing" }, ({ payload }) => {
             if (onTypingCallback) onTypingCallback(payload);
+          })
+          .subscribe();
+        // Realtime for 1-on-1 DMs (RLS ensures we only receive our own).
+        sb.channel("dms")
+          .on("postgres_changes", { event: "INSERT", schema: "public", table: "direct_messages" }, (payload) => {
+            if (onDmCallback) onDmCallback(payload.new);
           })
           .subscribe();
       } else {
@@ -395,6 +402,7 @@ const DB = (() => {
           return {
             id: p.id,
             author: p.profiles?.display_name ?? "Member",
+            authorId: p.user_id,
             authorAvatar: p.profiles?.avatar_url ?? null,
             area: p.profiles?.area ?? "",
             category: p.category,
@@ -426,6 +434,7 @@ const DB = (() => {
           }));
           return {
             ...p,
+            authorId: p.author, // demo identities are keyed by name
             authorAvatar: p.authorAvatar ?? (p.author === me.name ? me.avatar : null) ?? null,
             mine: p.author === me.name,
             reactions,
@@ -599,9 +608,11 @@ const DB = (() => {
           }
           return {
             id: m.id, author: m.profiles?.display_name ?? "Member",
+            authorId: m.user_id,
             authorAvatar: m.profiles?.avatar_url ?? null,
             mine: user ? m.user_id === user.id : false,
             text: m.body, image: m.image_url, audio: m.audio_url, createdAt: m.created_at,
+            editedAt: m.edited_at || null,
             parentId: m.parent_id,
             replyTo: m.parent_id ? byId[m.parent_id] ?? null : null,
             reactions,
@@ -619,6 +630,7 @@ const DB = (() => {
         for (const l of likes) reactions[l.reaction] = (reactions[l.reaction] || 0) + 1;
         return {
           ...m,
+          authorId: m.author, // demo identities are keyed by name
           authorAvatar: m.authorAvatar ?? (m.author === me.name ? me.avatar : null) ?? null,
           mine: m.author === me.name,
           parentId: m.parentId ?? null,
@@ -656,6 +668,27 @@ const DB = (() => {
       LS.write("ch_messages", msgs);
     },
 
+    async editMessage(messageId, text) {
+      if (useSupabase) {
+        const { error } = await sb.from("messages")
+          .update({ body: text, edited_at: new Date().toISOString() }).eq("id", messageId);
+        if (error) throw new Error(error.message);
+        return;
+      }
+      const msgs = LS.read("ch_messages", []);
+      const m = msgs.find((x) => x.id === messageId);
+      if (m) { m.text = text; m.editedAt = now(); LS.write("ch_messages", msgs); }
+    },
+
+    async deleteMessage(messageId) {
+      if (useSupabase) {
+        const { error } = await sb.from("messages").delete().eq("id", messageId);
+        if (error) throw new Error(error.message);
+        return;
+      }
+      LS.write("ch_messages", LS.read("ch_messages", []).filter((m) => m.id !== messageId));
+    },
+
     async setMessageReaction(messageId, emoji) {
       if (useSupabase) {
         const { data: { user } } = await sb.auth.getUser();
@@ -679,6 +712,244 @@ const DB = (() => {
 
     // Realtime: only fires in Supabase mode.
     onNewMessage(cb) { onMessageCallback = cb; },
+
+    /* ---------------- Profiles & Direct messages ---------------- */
+
+    // My own identity id (uuid in live mode, display name in demo).
+    async myId() {
+      if (useSupabase) { const { data: { user } } = await sb.auth.getUser(); return user?.id ?? null; }
+      return LS.read("ch_user", {}).name ?? null;
+    },
+
+    // Look up a member for their profile page.
+    async getMember(id) {
+      if (useSupabase) {
+        const { data } = await sb.from("profiles").select("*").eq("id", id).single();
+        if (!data) return null;
+        // Did this person block me? If so, I can't see their photo or message them.
+        const { data: { user } } = await sb.auth.getUser();
+        const { data: blk } = await sb.from("member_flags")
+          .select("blocked").eq("user_id", id).eq("target_id", user.id).eq("blocked", true).maybeSingle();
+        const blockedMe = !!blk;
+        return {
+          id: data.id, name: data.display_name, area: data.area,
+          avatar: blockedMe ? null : (data.avatar_url || null), blockedMe,
+        };
+      }
+      // demo: derive from posts/messages authored by that name
+      const src = [...LS.read("ch_posts", []), ...LS.read("ch_messages", [])].find((x) => x.author === id);
+      const meUser = LS.read("ch_user", {});
+      if (id === meUser.name) return { id, name: meUser.name, area: meUser.area, avatar: meUser.avatar || null };
+      return { id, name: id, area: src?.area || "", avatar: src?.authorAvatar || null };
+    },
+
+    // Conversations list: each partner with the last message + unread count.
+    async listConversations() {
+      if (useSupabase) {
+        const { data: { user } } = await sb.auth.getUser();
+        const { data, error } = await sb.from("direct_messages")
+          .select("*, sender:profiles!direct_messages_sender_id_fkey(display_name, avatar_url), recipient:profiles!direct_messages_recipient_id_fkey(display_name, avatar_url)")
+          .order("created_at", { ascending: false }).limit(400);
+        if (error) throw new Error(error.message);
+        const convos = {};
+        for (const m of data) {
+          const partnerIsSender = m.sender_id !== user.id;
+          const pid = partnerIsSender ? m.sender_id : m.recipient_id;
+          const pprof = partnerIsSender ? m.sender : m.recipient;
+          if (!convos[pid]) {
+            convos[pid] = {
+              partnerId: pid, name: pprof?.display_name ?? "Member", avatar: pprof?.avatar_url ?? null,
+              last: m.body || (m.image_url ? "📷 Photo" : m.audio_url ? "🎤 Voice note" : ""),
+              lastAt: m.created_at, unread: 0,
+            };
+          }
+          if (m.recipient_id === user.id && !m.read_at) convos[pid].unread++;
+        }
+        return Object.values(convos).sort((a, b) => b.lastAt.localeCompare(a.lastAt));
+      }
+      const meName = LS.read("ch_user", {}).name;
+      const dms = LS.read("ch_dms", []);
+      const convos = {};
+      for (const m of dms.slice().reverse()) {
+        const partner = m.senderId === meName ? m.recipientId : m.senderId;
+        if (partner === meName) continue;
+        if (!convos[partner]) {
+          const prof = [...LS.read("ch_posts", []), ...LS.read("ch_messages", [])].find((x) => x.author === partner);
+          convos[partner] = {
+            partnerId: partner, name: partner, avatar: prof?.authorAvatar ?? null,
+            last: m.body || (m.image ? "📷 Photo" : m.audio ? "🎤 Voice note" : ""),
+            lastAt: m.createdAt, unread: 0,
+          };
+        }
+        if (m.recipientId === meName && !m.read) convos[partner].unread++;
+      }
+      return Object.values(convos).sort((a, b) => b.lastAt.localeCompare(a.lastAt));
+    },
+
+    async getDirectMessages(partnerId) {
+      if (useSupabase) {
+        const { data: { user } } = await sb.auth.getUser();
+        const { data, error } = await sb.from("direct_messages")
+          .select("*")
+          .or(`and(sender_id.eq.${user.id},recipient_id.eq.${partnerId}),and(sender_id.eq.${partnerId},recipient_id.eq.${user.id})`)
+          .order("created_at", { ascending: true }).limit(500);
+        if (error) throw new Error(error.message);
+        return data.map((m) => ({
+          id: m.id, mine: m.sender_id === user.id,
+          text: m.body, image: m.image_url, audio: m.audio_url, createdAt: m.created_at,
+        }));
+      }
+      const meName = LS.read("ch_user", {}).name;
+      return LS.read("ch_dms", [])
+        .filter((m) => (m.senderId === meName && m.recipientId === partnerId) || (m.senderId === partnerId && m.recipientId === meName))
+        .map((m) => ({ id: m.id, mine: m.senderId === meName, text: m.body, image: m.image, audio: m.audio, createdAt: m.createdAt }));
+    },
+
+    async sendDirectMessage(partnerId, { text = "", image = null, audio = null } = {}) {
+      if (useSupabase) {
+        const { data: { user } } = await sb.auth.getUser();
+        let image_url = null, audio_url = null;
+        if (image) {
+          const path = `${user.id}/dm-${Date.now()}.jpg`;
+          const { error: e } = await sb.storage.from("photos").upload(path, image);
+          if (e) throw new Error(e.message);
+          image_url = sb.storage.from("photos").getPublicUrl(path).data.publicUrl;
+        }
+        if (audio) {
+          const path = `${user.id}/dm-voice-${Date.now()}.webm`;
+          const { error: e } = await sb.storage.from("photos").upload(path, audio, { contentType: "audio/webm" });
+          if (e) throw new Error(e.message);
+          audio_url = sb.storage.from("photos").getPublicUrl(path).data.publicUrl;
+        }
+        const { error } = await sb.from("direct_messages")
+          .insert({ sender_id: user.id, recipient_id: partnerId, body: text, image_url, audio_url });
+        if (error) throw new Error(error.message);
+        return;
+      }
+      const meName = LS.read("ch_user", {}).name;
+      const dms = LS.read("ch_dms", []);
+      dms.push({ id: uid(), senderId: meName, recipientId: partnerId, body: text, image, audio, createdAt: now(), read: false });
+      LS.write("ch_dms", dms);
+    },
+
+    async markDmsRead(partnerId) {
+      if (useSupabase) {
+        const { data: { user } } = await sb.auth.getUser();
+        await sb.from("direct_messages").update({ read_at: new Date().toISOString() })
+          .eq("recipient_id", user.id).eq("sender_id", partnerId).is("read_at", null);
+        return;
+      }
+      const meName = LS.read("ch_user", {}).name;
+      const dms = LS.read("ch_dms", []);
+      let changed = false;
+      for (const m of dms) if (m.recipientId === meName && m.senderId === partnerId && !m.read) { m.read = true; changed = true; }
+      if (changed) LS.write("ch_dms", dms);
+    },
+
+    onDirectMessage(cb) { onDmCallback = cb; },
+
+    // Everyone registered on the app (for a WhatsApp-style "new chat" list).
+    async getAllMembers() {
+      if (useSupabase) {
+        const { data: { user } } = await sb.auth.getUser();
+        const { data, error } = await sb.from("profiles").select("id, display_name, area, avatar_url").order("display_name");
+        if (error) throw new Error(error.message);
+        return data.filter((m) => m.id !== user.id)
+          .map((m) => ({ id: m.id, name: m.display_name, area: m.area, avatar: m.avatar_url || null }));
+      }
+      const meName = LS.read("ch_user", {}).name;
+      const seen = {};
+      for (const x of [...LS.read("ch_posts", []), ...LS.read("ch_messages", [])]) {
+        if (x.author && x.author !== meName && !seen[x.author]) seen[x.author] = { id: x.author, name: x.author, area: x.area || "", avatar: x.authorAvatar || null };
+      }
+      return Object.values(seen).sort((a, b) => a.name.localeCompare(b.name));
+    },
+
+    /* ---------------- Hide / block ---------------- */
+
+    // My flags on other people: { targetId: { hidden, blocked } }
+    async getMyFlags() {
+      if (useSupabase) {
+        const { data: { user } } = await sb.auth.getUser();
+        const { data } = await sb.from("member_flags").select("*").eq("user_id", user.id);
+        const map = {};
+        (data ?? []).forEach((f) => (map[f.target_id] = { hidden: f.hidden, blocked: f.blocked }));
+        return map;
+      }
+      return LS.read("ch_flags", {});
+    },
+
+    // Ids of people who have BLOCKED me (so I can hide their avatar to them, etc.)
+    async getBlockedMeIds() {
+      if (useSupabase) {
+        const { data: { user } } = await sb.auth.getUser();
+        const { data } = await sb.from("member_flags").select("user_id").eq("target_id", user.id).eq("blocked", true);
+        return (data ?? []).map((f) => f.user_id);
+      }
+      return []; // demo is single-user
+    },
+
+    async setFlag(targetId, kind, value) {
+      if (useSupabase) {
+        const { data: { user } } = await sb.auth.getUser();
+        const patch = { user_id: user.id, target_id: targetId, [kind]: value };
+        const { error } = await sb.from("member_flags").upsert(patch, { onConflict: "user_id,target_id" });
+        if (error) throw new Error(error.message);
+        return;
+      }
+      const flags = LS.read("ch_flags", {});
+      flags[targetId] = { ...(flags[targetId] || { hidden: false, blocked: false }), [kind]: value };
+      LS.write("ch_flags", flags);
+    },
+    setHide(targetId, value) { return this.setFlag(targetId, "hidden", value); },
+    setBlock(targetId, value) { return this.setFlag(targetId, "blocked", value); },
+
+    /* ---------------- Stories (statuses) ---------------- */
+
+    async getStories() {
+      const cutoff = Date.now() - 60 * 60 * 1000; // 1 hour
+      let rows;
+      if (useSupabase) {
+        const { data, error } = await sb.from("stories")
+          .select("*, profiles(display_name, avatar_url)")
+          .gte("created_at", new Date(cutoff).toISOString())
+          .order("created_at", { ascending: true });
+        if (error) throw new Error(error.message);
+        rows = data.map((s) => ({
+          id: s.id, authorId: s.user_id, author: s.profiles?.display_name ?? "Member",
+          authorAvatar: s.profiles?.avatar_url ?? null, kind: s.kind, body: s.body,
+          image: s.image_url, bg: s.bg, createdAt: s.created_at,
+        }));
+      } else {
+        rows = LS.read("ch_stories", []).filter((s) => new Date(s.createdAt).getTime() >= cutoff);
+      }
+      // group by author, preserving order
+      const groups = {};
+      for (const s of rows) {
+        (groups[s.authorId] ??= { authorId: s.authorId, author: s.author, authorAvatar: s.authorAvatar, items: [] }).items.push(s);
+      }
+      return Object.values(groups);
+    },
+
+    async addStory({ kind, body = "", image = null, bg = "" }) {
+      if (useSupabase) {
+        const { data: { user } } = await sb.auth.getUser();
+        let image_url = null;
+        if (image) {
+          const path = `${user.id}/story-${Date.now()}.jpg`;
+          const { error: e } = await sb.storage.from("photos").upload(path, image);
+          if (e) throw new Error(e.message);
+          image_url = sb.storage.from("photos").getPublicUrl(path).data.publicUrl;
+        }
+        const { error } = await sb.from("stories").insert({ user_id: user.id, kind, body, image_url, bg });
+        if (error) throw new Error(error.message);
+        return;
+      }
+      const me = LS.read("ch_user", {});
+      const stories = LS.read("ch_stories", []);
+      stories.push({ id: uid(), authorId: me.name, author: me.name, authorAvatar: me.avatar || null, kind, body, image: image || null, bg, createdAt: now() });
+      LS.write("ch_stories", stories);
+    },
 
     /* ---------------- Business directory ---------------- */
 

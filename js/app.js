@@ -294,11 +294,24 @@
   /* ---------------- feed ---------------- */
 
   async function renderFeed() {
-    const posts = await DB.getPosts();
+    const [posts, storyGroups] = await Promise.all([DB.getPosts(), DB.getStories().catch(() => [])]);
     const filtered = feedFilter === "all" ? posts : posts.filter((p) => p.category === feedFilter);
+    const myId = await DB.myId();
 
     view.innerHTML = `
       <div class="feed">
+        <div class="stories-bar" id="storiesBar">
+          <button class="story-item story-add" data-storyadd>
+            <span class="story-ring story-ring-add">${avatarHtml(me.name, me.avatar, "avatar-sm")}<span class="story-plus">＋</span></span>
+            <span class="story-name">Your story</span>
+          </button>
+          ${storyGroups.map((g, i) => `
+            <button class="story-item" data-story="${i}">
+              <span class="story-ring ${g.authorId === myId ? "mine" : ""}">${avatarHtml(g.author, g.authorAvatar, "avatar-sm")}</span>
+              <span class="story-name">${esc(g.authorId === myId ? "You" : g.author.split(" ")[0])}</span>
+            </button>`).join("")}
+        </div>
+
         <div class="filter-row">
           <button class="chip ${feedFilter === "all" ? "chip-on" : ""}" data-filter="all">All</button>
           ${CONFIG.CATEGORIES.map((c) =>
@@ -316,11 +329,122 @@
           : filtered.map(postCard).join("")}
       </div>`;
 
+    $("[data-storyadd]").addEventListener("click", openStoryCreator);
+    view.querySelectorAll("[data-story]").forEach((b) =>
+      b.addEventListener("click", () => openStoryViewer(storyGroups, +b.dataset.story)));
+
     // filter chips
     view.querySelectorAll("[data-filter]").forEach((b) =>
       b.addEventListener("click", () => { feedFilter = b.dataset.filter; renderFeed(); }));
 
-    // react button opens the emoji picker (tap again to close)
+    wirePostCards(() => renderFeed());
+  }
+
+  /* ---------------- stories (statuses) ---------------- */
+
+  const STORY_BGS = ["#1e7a4a", "#2b5aa0", "#a06a14", "#6a3fa0", "#b03a3a", "#14563a"];
+  let storyImage = null;
+
+  function openStoryCreator() {
+    storyImage = null;
+    openModal(`
+      <div class="modal-head">
+        <h2>Add to your story</h2>
+        <button class="modal-close" data-close>✕</button>
+      </div>
+      <form id="storyForm" class="compose-form">
+        <textarea id="storyText" rows="3" maxlength="280" placeholder="Say something… (or add a photo)"></textarea>
+        <div class="story-bgs" id="storyBgs">
+          ${STORY_BGS.map((c, i) => `<button type="button" class="story-bg ${i === 0 ? "on" : ""}" data-bg="${c}" style="background:${c}"></button>`).join("")}
+        </div>
+        <div class="compose-photo">
+          <label class="btn-outline btn-sm">📷 Add photo<input type="file" id="storyPhoto" accept="image/*" hidden /></label>
+          <span id="storyPhotoName" class="photo-name"></span>
+        </div>
+        <p class="account-hint">Your story disappears after 1 hour.</p>
+        <button type="submit" class="btn-primary btn-block">Share to story</button>
+      </form>`);
+    let bg = STORY_BGS[0];
+    modalBody.querySelectorAll("[data-bg]").forEach((b) =>
+      b.addEventListener("click", () => {
+        bg = b.dataset.bg;
+        modalBody.querySelectorAll(".story-bg").forEach((x) => x.classList.toggle("on", x === b));
+      }));
+    $("#storyPhoto").addEventListener("change", async (e) => {
+      const file = e.target.files[0]; if (!file) return;
+      $("#storyPhotoName").textContent = file.name;
+      storyImage = DB.mode === "demo" ? await fileToDataUrl(file) : file;
+    });
+    $("#storyForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = $("#storyText").value.trim();
+      if (!text && !storyImage) { toast("Write something or add a photo."); return; }
+      try {
+        await DB.addStory({ kind: storyImage ? "image" : "text", body: text, image: storyImage, bg });
+        closeModal();
+        if (currentView === "feed") renderFeed();
+        toast("Added to your story 🎉");
+      } catch (err) { toast(err.message); }
+    });
+  }
+
+  // Full-screen story viewer. Steps through one author's items, then the next
+  // author's, with auto-advancing progress bars.
+  function openStoryViewer(groups, startIndex) {
+    let gi = startIndex, ii = 0, timer = null;
+    const overlay = document.createElement("div");
+    overlay.className = "story-viewer";
+    document.body.appendChild(overlay);
+    document.body.classList.add("modal-open");
+
+    const close = () => { clearTimeout(timer); overlay.remove(); document.body.classList.remove("modal-open"); };
+    const next = () => {
+      clearTimeout(timer);
+      const g = groups[gi];
+      if (ii < g.items.length - 1) { ii++; render(); }
+      else if (gi < groups.length - 1) { gi++; ii = 0; render(); }
+      else close();
+    };
+    const prev = () => {
+      clearTimeout(timer);
+      if (ii > 0) { ii--; render(); }
+      else if (gi > 0) { gi--; ii = 0; render(); }
+      else render();
+    };
+
+    function render() {
+      const g = groups[gi];
+      const s = g.items[ii];
+      overlay.innerHTML = `
+        <div class="story-progress">
+          ${g.items.map((_, k) => `<span class="story-pbar"><i style="animation:none;width:${k < ii ? 100 : 0}%"></i></span>`).join("")}
+        </div>
+        <div class="story-topbar">
+          ${avatarHtml(g.author, g.authorAvatar, "avatar-sm")}
+          <span class="story-author">${esc(g.author)}</span>
+          <span class="story-when">${timeAgo(s.createdAt)}</span>
+          <button class="story-close" data-sclose>✕</button>
+        </div>
+        <div class="story-body ${s.kind === "text" ? "story-text" : ""}" style="${s.kind === "text" ? `background:${esc(s.bg || STORY_BGS[0])}` : ""}">
+          ${s.image ? `<img src="${esc(s.image)}" alt="story" />` : ""}
+          ${s.body ? `<div class="story-caption ${s.kind === "text" ? "big" : ""}">${esc(s.body)}</div>` : ""}
+        </div>
+        <button class="story-nav story-prev" data-sprev></button>
+        <button class="story-nav story-next" data-snext></button>`;
+      // animate current progress bar
+      const bar = overlay.querySelectorAll(".story-pbar i")[ii];
+      requestAnimationFrame(() => { bar.style.transition = "width 5s linear"; bar.style.width = "100%"; });
+      timer = setTimeout(next, 5000);
+      overlay.querySelector("[data-sclose]").addEventListener("click", close);
+      overlay.querySelector("[data-snext]").addEventListener("click", next);
+      overlay.querySelector("[data-sprev]").addEventListener("click", prev);
+    }
+    render();
+  }
+
+  // Wire all post-card interactions inside `view`. Shared by the feed and a
+  // member's profile page. `refresh` re-renders the current surface.
+  function wirePostCards(refresh) {
     view.querySelectorAll("[data-react-toggle]").forEach((b) =>
       b.addEventListener("click", () => {
         const picker = b.parentElement.querySelector(".react-picker");
@@ -329,15 +453,13 @@
         picker.hidden = !wasHidden;
       }));
 
-    // choosing an emoji sets my reaction; choosing my current one removes it
     view.querySelectorAll("[data-react]").forEach((b) =>
       b.addEventListener("click", async () => {
         const removing = b.classList.contains("react-current");
         await DB.setReaction(b.dataset.react, removing ? null : b.dataset.emoji);
-        renderFeed();
+        refresh();
       }));
 
-    // toggle comments
     view.querySelectorAll("[data-comments]").forEach((b) =>
       b.addEventListener("click", () => {
         const box = $(`#comments-${b.dataset.comments}`, view);
@@ -345,10 +467,8 @@
         if (!box.hidden) $(".comment-form:not(.reply-form) input", box)?.focus();
       }));
 
-    // comment like / reply / delete / view-all — shared with the comments popup
-    wireCommentActions(view, () => renderFeed());
+    wireCommentActions(view, refresh);
 
-    // three-dot post menu (own posts)
     view.querySelectorAll("[data-postmenu]").forEach((b) =>
       b.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -363,7 +483,7 @@
       b.addEventListener("click", async () => {
         if (!confirm("Delete this post? This can't be undone.")) return;
         await DB.deletePost(b.dataset.delpost);
-        renderFeed();
+        refresh();
         toast("Post deleted");
       }));
   }
@@ -375,9 +495,9 @@
     return `
       <article class="card post">
         <header class="post-head">
-          ${avatarHtml(p.author, p.authorAvatar)}
+          <span data-member="${esc(p.authorId)}" class="member-link">${avatarHtml(p.author, p.authorAvatar)}</span>
           <div class="post-meta">
-            <div class="post-author">${esc(p.author)}</div>
+            <div class="post-author member-link" data-member="${esc(p.authorId)}">${esc(p.author)}</div>
             <div class="post-sub">${esc(p.area)} · ${timeAgo(p.createdAt)}${p.editedAt ? ` · <span class="edited-tag">edited</span>` : ""} · <span class="cat-inline">${cat.icon} ${esc(cat.label)}</span></div>
           </div>
           ${p.mine ? `
@@ -476,6 +596,9 @@
     root.querySelectorAll("[data-viewall]").forEach((b) =>
       b.addEventListener("click", () => openCommentsModal(b.dataset.viewall)));
 
+    root.querySelectorAll("[data-viewreplies]").forEach((b) =>
+      b.addEventListener("click", () => openRepliesModal(b.dataset.post, b.dataset.viewreplies)));
+
     // voice comment mic (on the main + popup composers)
     root.querySelectorAll(".comment-mic").forEach((btn) => {
       const form = btn.closest("form");
@@ -512,6 +635,40 @@
     wireCommentActions(modalBody, () => openCommentsModal(postId));
   }
 
+  const findComment = (nodes, id) => {
+    for (const c of nodes ?? []) {
+      if (c.id === id) return c;
+      const found = findComment(c.replies, id);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  // Replies-only popup: shows one comment and just ITS replies (not the
+  // whole post's comments).
+  async function openRepliesModal(postId, commentId) {
+    const posts = await DB.getPosts();
+    const p = posts.find((x) => x.id === postId);
+    const c = p && findComment(p.comments, commentId);
+    if (!c) return;
+    openModal(`
+      <div class="modal-head">
+        <h2>Replies</h2>
+        <button class="modal-close" data-close>✕</button>
+      </div>
+      <div class="comments comments-modal" id="modalComments">
+        ${commentHtml(postId, c, true)}
+      </div>
+      <form class="comment-form comment-form-sticky" data-comment-form="${esc(postId)}" data-parent="${esc(commentId)}">
+        ${avatarHtml(me.name, me.avatar, "avatar-sm")}
+        <input type="text" placeholder="Reply to ${esc(c.author.split(" ")[0])}…" maxlength="500" />
+        <button type="button" class="comment-mic" title="Voice reply">🎤</button>
+        <button type="submit" class="btn-mini">Send</button>
+      </form>`);
+    feedDirty = true;
+    wireCommentActions(modalBody, () => openRepliesModal(postId, commentId));
+  }
+
   const REPLY_PREVIEW = 2; // replies shown under a comment before "view more"
 
   // Flatten a comment's whole reply subtree into one chronological list.
@@ -539,7 +696,7 @@
       ${commentSingle(postId, c, 0, null)}
       <div class="reply-group">
         ${shown.map(({ c: r, replyTo }) => commentSingle(postId, r, 1, replyTo)).join("")}
-        ${more > 0 ? `<button class="view-all-comments view-more-replies" data-viewall="${esc(postId)}">View ${more} more repl${more === 1 ? "y" : "ies"} →</button>` : ""}
+        ${more > 0 ? `<button class="view-all-comments view-more-replies" data-viewreplies="${esc(c.id)}" data-post="${esc(postId)}">View ${more} more repl${more === 1 ? "y" : "ies"} →</button>` : ""}
       </div>`;
   }
 
@@ -653,6 +810,32 @@
     });
   }
 
+  function openEditMessage(id, msgs) {
+    const m = msgs.find((x) => x.id === id);
+    if (!m) return;
+    openModal(`
+      <div class="modal-head">
+        <h2>Edit message</h2>
+        <button class="modal-close" data-close>✕</button>
+      </div>
+      <form id="editMsgForm" class="compose-form">
+        <textarea id="editMsgText" rows="3" maxlength="1000" required>${esc(m.text || "")}</textarea>
+        <button type="submit" class="btn-primary btn-block">Save changes</button>
+      </form>`);
+    const ta = $("#editMsgText"); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+    $("#editMsgForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = $("#editMsgText").value.trim();
+      if (!text) return;
+      try {
+        await DB.editMessage(id, text);
+        closeModal();
+        renderChat();
+        toast("Message updated");
+      } catch (err) { toast(err.message); }
+    });
+  }
+
   /* ---------------- chat ---------------- */
 
   async function renderChat() {
@@ -710,13 +893,13 @@
       }
     });
 
-    // message reactions: open picker / choose emoji
-    view.querySelectorAll("[data-msgreact-toggle]").forEach((b) =>
+    // message options menu (⋯ / long-press): react, reply, edit, delete
+    view.querySelectorAll("[data-msgmenu]").forEach((b) =>
       b.addEventListener("click", () => {
-        const picker = b.parentElement.querySelector(".react-picker");
-        const wasHidden = picker.hidden;
-        view.querySelectorAll(".react-picker").forEach((p) => (p.hidden = true));
-        picker.hidden = !wasHidden;
+        const menu = b.parentElement.querySelector(".msg-menu");
+        const wasHidden = menu.hidden;
+        view.querySelectorAll(".msg-menu").forEach((p) => (p.hidden = true));
+        menu.hidden = !wasHidden;
       }));
     view.querySelectorAll("[data-msgreact]").forEach((b) =>
       b.addEventListener("click", async () => {
@@ -724,8 +907,16 @@
         await DB.setMessageReaction(b.dataset.msgreact, removing ? null : b.dataset.emoji);
         renderChat();
       }));
+    view.querySelectorAll("[data-msgedit]").forEach((b) =>
+      b.addEventListener("click", () => openEditMessage(b.dataset.msgedit, msgs)));
+    view.querySelectorAll("[data-msgdel]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        if (!confirm("Delete this message?")) return;
+        await DB.deleteMessage(b.dataset.msgdel);
+        renderChat();
+      }));
 
-    // reply to a message (button)
+    // reply to a message (from the menu)
     view.querySelectorAll("[data-msgreply]").forEach((b) =>
       b.addEventListener("click", () => setChatReply(b.dataset.msgreply, msgs, input)));
 
@@ -841,24 +1032,29 @@
     const hhmm = new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     return `
       <div class="msg ${mine ? "msg-mine" : ""} ${grouped ? "msg-grouped" : ""}" data-msgid="${esc(m.id)}">
-        ${mine ? "" : (grouped ? `<span class="avatar avatar-sm avatar-spacer"></span>` : avatarHtml(m.author, m.authorAvatar, "avatar-sm"))}
+        ${mine ? "" : (grouped ? `<span class="avatar avatar-sm avatar-spacer"></span>` : `<span data-member="${esc(m.authorId)}" class="member-link">${avatarHtml(m.author, m.authorAvatar, "avatar-sm")}</span>`)}
         <div class="msg-col">
           <div class="msg-bubble">
             ${m.replyTo ? `<div class="msg-quote"><span class="msg-quote-author">${esc(m.replyTo.author)}</span>${esc((m.replyTo.text || "").slice(0, 80))}</div>` : ""}
-            ${mine || grouped ? "" : `<span class="msg-author">${esc(m.author)}</span>`}
+            ${mine || grouped ? "" : `<span class="msg-author member-link" data-member="${esc(m.authorId)}">${esc(m.author)}</span>`}
             ${m.image ? `<img class="msg-img" src="${esc(m.image)}" alt="Photo" loading="lazy" />` : ""}
             ${m.audio ? `<audio class="voice-player" controls src="${esc(m.audio)}"></audio>` : ""}
             ${m.text ? `<span class="msg-text">${esc(m.text)}</span>` : ""}
-            <span class="msg-time">${hhmm}</span>
+            <span class="msg-time">${hhmm}${m.editedAt ? " · edited" : ""}</span>
             ${reactTotal ? `<span class="msg-reacts">${reactEntries.map(([e, n]) => `${e}${n > 1 ? ` ${n}` : ""}`).join("")}</span>` : ""}
           </div>
           <div class="msg-actions">
-            <button class="msg-act" data-msgreact-toggle="${esc(m.id)}" title="React">🙂</button>
-            <button class="msg-act" data-msgreply="${esc(m.id)}" title="Reply">↩</button>
-            <div class="react-picker" hidden>
-              ${CONFIG.REACTIONS.map((e) => `
-                <button class="react-emoji ${m.myReaction === e ? "react-current" : ""}"
-                  data-msgreact="${esc(m.id)}" data-emoji="${e}">${e}</button>`).join("")}
+            <button class="msg-act" data-msgmenu="${esc(m.id)}" title="Options">⋯</button>
+            <div class="msg-menu react-picker" hidden>
+              <div class="msg-menu-emojis">
+                ${CONFIG.REACTIONS.map((e) => `
+                  <button class="react-emoji ${m.myReaction === e ? "react-current" : ""}"
+                    data-msgreact="${esc(m.id)}" data-emoji="${e}">${e}</button>`).join("")}
+              </div>
+              <button class="msg-menu-item" data-msgreply="${esc(m.id)}">↩ Reply</button>
+              ${mine ? `
+                <button class="msg-menu-item" data-msgedit="${esc(m.id)}">✏️ Edit</button>
+                <button class="msg-menu-item danger" data-msgdel="${esc(m.id)}">🗑️ Delete</button>` : ""}
             </div>
           </div>
         </div>
@@ -1005,6 +1201,12 @@
 
         <div class="card account-card">
           <h3>My account</h3>
+          <button class="account-row" id="myProfileBtn">
+            <span>🧑 View my profile & posts</span><span class="account-chev">›</span>
+          </button>
+          <button class="account-row" id="dmListBtn">
+            <span>💬 Direct messages</span><span class="account-chev">›</span>
+          </button>
           <button class="account-row" id="editProfileBtn">
             <span>✏️ Edit name & area</span><span class="account-chev">›</span>
           </button>
@@ -1032,6 +1234,8 @@
         <button class="btn-outline btn-block" id="signOutBtn">Sign out</button>
       </div>`;
 
+    $("#myProfileBtn").addEventListener("click", async () => openMember(await DB.myId()));
+    $("#dmListBtn").addEventListener("click", renderDMList);
     $("#editProfileBtn").addEventListener("click", openEditProfile);
     $("#changePinBtn")?.addEventListener("click", openChangePin);
     if (DB.supportsPush) setupPushToggle();
@@ -1273,6 +1477,200 @@
     } catch { /* rail is optional; ignore fetch errors */ }
   }
 
+  /* ---------------- member profiles & direct messages ---------------- */
+
+  // A member's public profile: their info, a Message button, and their posts.
+  async function openMember(id) {
+    if (!id) return;
+    const myId = await DB.myId();
+    const isMe = id === myId;
+    const [member, allPosts, flags] = await Promise.all([DB.getMember(id), DB.getPosts(), DB.getMyFlags()]);
+    if (!member) return;
+    const theirPosts = allPosts.filter((p) => p.authorId === id);
+    const f = flags[id] || {};
+    currentView = "member";
+    document.querySelectorAll(".bottomnav .nav-item[data-nav], .side-item").forEach((b) => b.classList.remove("active"));
+    view.innerHTML = `
+      <div class="subview">
+        <div class="subview-head">
+          <button class="back-btn" data-back>←</button>
+          <span>${esc(member.name)}</span>
+        </div>
+        <div class="card member-hero">
+          ${avatarHtml(member.name, member.avatar, "avatar-lg")}
+          <h2>${esc(member.name)}</h2>
+          <p class="profile-sub">${esc(member.area || "")}</p>
+          ${member.blockedMe ? `<p class="member-note">This person has blocked you.</p>` : ""}
+          ${isMe || member.blockedMe ? "" : `
+            <div class="member-actions">
+              ${f.blocked ? "" : `<button class="btn-primary" id="dmBtn">💬 Message</button>`}
+              <button class="btn-outline btn-sm" id="hideBtn">${f.hidden ? "🙉 Unhide" : "🙈 Hide"}</button>
+              <button class="btn-outline btn-sm danger" id="blockBtn">${f.blocked ? "Unblock" : "🚫 Block"}</button>
+            </div>
+            ${f.hidden ? `<p class="member-note">Hidden: their messages arrive quietly, no notifications.</p>` : ""}
+            ${f.blocked ? `<p class="member-note">Blocked: they can't message you or see your photo.</p>` : ""}`}
+        </div>
+        <div class="member-posts-title">${isMe ? "My posts" : "Posts"} ${theirPosts.length ? `· ${theirPosts.length}` : ""}</div>
+        ${theirPosts.length ? theirPosts.map(postCard).join("") : `<div class="empty">No posts yet.</div>`}
+      </div>`;
+    $("[data-back]").addEventListener("click", () => switchView("feed"));
+    $("#dmBtn")?.addEventListener("click", () => openDM(id, member.name, member.avatar));
+    $("#hideBtn")?.addEventListener("click", async () => {
+      await DB.setHide(id, !f.hidden);
+      toast(f.hidden ? "Unhidden" : "Hidden 🙈");
+      openMember(id); refreshDmBadge();
+    });
+    $("#blockBtn")?.addEventListener("click", async () => {
+      if (!f.blocked && !confirm(`Block ${member.name}? They won't be able to message you.`)) return;
+      await DB.setBlock(id, !f.blocked);
+      toast(f.blocked ? "Unblocked" : "Blocked 🚫");
+      openMember(id);
+    });
+    wirePostCards(() => openMember(id));
+    renderRightRail();
+    window.scrollTo(0, 0);
+  }
+
+  // Direct messages: conversations, a "Hidden chats" reveal, and everyone on
+  // the app to start a new chat (WhatsApp-style).
+  let showHiddenChats = false;
+  async function renderDMList() {
+    currentView = "dms";
+    const [convos, members, flags] = await Promise.all([
+      DB.listConversations(), DB.getAllMembers(), DB.getMyFlags(),
+    ]);
+    const hiddenOf = (id) => flags[id]?.hidden;
+    const visible = convos.filter((c) => !hiddenOf(c.partnerId));
+    const hidden = convos.filter((c) => hiddenOf(c.partnerId));
+    const convoIds = new Set(convos.map((c) => c.partnerId));
+    const contacts = members.filter((m) => !convoIds.has(m.id) && !hiddenOf(m.id));
+
+    const convoRow = (c) => `
+      <button class="card convo-row" data-dm="${esc(c.partnerId)}" data-name="${esc(c.name)}">
+        ${avatarHtml(c.name, c.avatar)}
+        <div class="convo-meta">
+          <div class="convo-name">${esc(c.name)}</div>
+          <div class="convo-last">${esc((c.last || "").slice(0, 40))}</div>
+        </div>
+        ${c.unread ? `<span class="convo-unread">${c.unread}</span>` : ""}
+      </button>`;
+
+    view.innerHTML = `
+      <div class="subview">
+        <div class="subview-head">
+          <button class="back-btn" data-back>←</button>
+          <span>Direct messages</span>
+        </div>
+        ${visible.length ? visible.map(convoRow).join("") : `<div class="empty">No chats yet — pick someone below to start. 💬</div>`}
+        ${hidden.length ? `
+          <button class="hidden-link" id="toggleHidden">🙈 Hidden chats (${hidden.length})</button>
+          <div id="hiddenChats" ${showHiddenChats ? "" : "hidden"}>${hidden.map(convoRow).join("")}</div>` : ""}
+        ${contacts.length ? `
+          <div class="dm-section-title">People on ${esc(CONFIG.APP_NAME)}</div>
+          ${contacts.map((m) => `
+            <button class="card convo-row" data-dm="${esc(m.id)}" data-name="${esc(m.name)}">
+              ${avatarHtml(m.name, m.avatar)}
+              <div class="convo-meta">
+                <div class="convo-name">${esc(m.name)}</div>
+                <div class="convo-last">${esc(m.area || "Tap to message")}</div>
+              </div>
+            </button>`).join("")}` : ""}
+      </div>`;
+    $("[data-back]").addEventListener("click", () => switchView("profile"));
+    $("#toggleHidden")?.addEventListener("click", () => {
+      showHiddenChats = !showHiddenChats;
+      $("#hiddenChats").hidden = !showHiddenChats;
+    });
+    view.querySelectorAll("[data-dm]").forEach((b) =>
+      b.addEventListener("click", () => openDM(b.dataset.dm, b.dataset.name)));
+    renderRightRail();
+  }
+
+  // A 1-on-1 conversation thread.
+  let dmPartner = null;
+  async function openDM(partnerId, partnerName, partnerAvatar) {
+    currentView = "dm";
+    const [member, flags, msgs] = await Promise.all([
+      DB.getMember(partnerId), DB.getMyFlags(), DB.getDirectMessages(partnerId),
+    ]);
+    // resolve up-to-date name/avatar (member may null the avatar if they blocked me)
+    partnerName = member?.name ?? partnerName;
+    partnerAvatar = member?.avatar ?? partnerAvatar;
+    dmPartner = { id: partnerId, name: partnerName, avatar: partnerAvatar };
+    await DB.markDmsRead(partnerId);
+    refreshDmBadge();
+
+    const iBlocked = flags[partnerId]?.blocked;
+    const theyBlocked = member?.blockedMe;
+    const barrier = iBlocked
+      ? `<div class="dm-barrier">You blocked ${esc(partnerName.split(" ")[0])}. <button class="link-btn" id="unblockBtn">Unblock</button> to chat.</div>`
+      : theyBlocked
+      ? `<div class="dm-barrier">You can't message this person.</div>`
+      : "";
+    const composer = (iBlocked || theyBlocked) ? "" : `
+        <div class="attach-preview" id="attachPreview" hidden></div>
+        <form class="chat-form" id="dmForm">
+          <label class="chat-attach" title="Send a photo">📎<input type="file" id="dmPhoto" accept="image/*" hidden /></label>
+          <input type="text" id="dmInput" placeholder="Message ${esc(partnerName.split(" ")[0])}…" maxlength="1000" autocomplete="off" />
+          <button type="button" class="chat-mic" id="dmMic" title="Voice note">🎤</button>
+          <button type="submit" class="btn-primary chat-send">➤</button>
+        </form>`;
+
+    view.innerHTML = `
+      <div class="chat dm-thread">
+        <div class="subview-head">
+          <button class="back-btn" data-back>←</button>
+          <span data-member="${esc(partnerId)}" class="member-link">${avatarHtml(partnerName, partnerAvatar, "avatar-sm")}</span>
+          <span class="member-link" data-member="${esc(partnerId)}">${esc(partnerName)}</span>
+        </div>
+        <div class="chat-scroll" id="dmScroll">
+          ${msgs.map(dmBubble).join("") || `<div class="empty">Say hello 👋</div>`}
+        </div>
+        ${barrier}
+        ${composer}
+      </div>`;
+    const scroll = $("#dmScroll"); scroll.scrollTop = scroll.scrollHeight;
+    $("[data-back]").addEventListener("click", () => renderDMList());
+    $("#unblockBtn")?.addEventListener("click", async () => {
+      await DB.setBlock(partnerId, false); toast("Unblocked"); openDM(partnerId, partnerName, partnerAvatar);
+    });
+    if (composer) {
+      $("#dmPhoto").addEventListener("change", async (e) => {
+        const file = e.target.files[0]; if (!file) return;
+        chatImage = DB.mode === "demo" ? await fileToDataUrl(file) : file; updateAttachPreview();
+      });
+      $("#dmForm").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const input = $("#dmInput"); const text = input.value.trim();
+        if (!text && !chatImage) return;
+        const image = chatImage; input.value = ""; chatImage = null; updateAttachPreview();
+        try { await DB.sendDirectMessage(partnerId, { text, image }); }
+        catch (err) { toast(/row-level|policy/i.test(err.message) ? "You can't message this person." : err.message); }
+        if (currentView === "dm") openDM(partnerId, partnerName, partnerAvatar);
+      });
+      wireMic($("#dmMic"), async (audio) => {
+        await DB.sendDirectMessage(partnerId, { audio });
+        if (currentView === "dm") openDM(partnerId, partnerName, partnerAvatar);
+      }, (rec) => { const m = $("#dmMic"); m.classList.toggle("recording", rec); m.textContent = rec ? "⏹" : "🎤"; });
+    }
+    renderRightRail();
+  }
+
+  function dmBubble(m) {
+    const hhmm = new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return `
+      <div class="msg ${m.mine ? "msg-mine" : ""}">
+        <div class="msg-col">
+          <div class="msg-bubble">
+            ${m.image ? `<img class="msg-img" src="${esc(m.image)}" alt="Photo" loading="lazy" />` : ""}
+            ${m.audio ? `<audio class="voice-player" controls src="${esc(m.audio)}"></audio>` : ""}
+            ${m.text ? `<span class="msg-text">${esc(m.text)}</span>` : ""}
+            <span class="msg-time">${hhmm}</span>
+          </div>
+        </div>
+      </div>`;
+  }
+
   /* ---------------- navigation ---------------- */
 
   const views = { feed: renderFeed, chat: renderChat, market: renderMarket, profile: renderProfile };
@@ -1293,6 +1691,8 @@
     if (!e.target.closest(".react-wrap") && !e.target.closest(".msg-actions"))
       document.querySelectorAll(".react-picker").forEach((p) => (p.hidden = true));
 
+    const memberLink = e.target.closest("[data-member]");
+    if (memberLink && me) { openMember(memberLink.dataset.member); return; }
     const railFilter = e.target.closest("[data-railfilter]");
     if (railFilter && me) { feedFilter = railFilter.dataset.railfilter; switchView("feed"); return; }
     const nav = e.target.closest("[data-nav]");
@@ -1338,12 +1738,40 @@
     // Refresh chat live when someone else sends a message (Supabase mode).
     DB.onNewMessage(() => { if (currentView === "chat") renderChat(); });
     DB.onTyping(handleTyping);
+    DB.onDirectMessage(async (dm) => {
+      // hidden people's messages arrive but only pop up (no push, not in main list)
+      const flags = await DB.getMyFlags().catch(() => ({}));
+      const fromHidden = dm.sender_id && flags[dm.sender_id]?.hidden;
+      if (currentView === "dm" && dmPartner && (dm.sender_id === dmPartner.id || dm.recipient_id === dmPartner.id)) {
+        openDM(dmPartner.id, dmPartner.name, dmPartner.avatar);
+      } else if (currentView === "dms") {
+        renderDMList();
+      } else {
+        toast(fromHidden ? "🙈 New message from a hidden person" : "💬 New message");
+      }
+      refreshDmBadge();
+    });
+
+    // Direct-messages icon in the top bar
+    $("#dmIcon").addEventListener("click", () => { if (me) renderDMList(); });
 
     try {
       me = await DB.currentUser();
     } catch {
       me = null; // e.g. network hiccup during session restore
     }
-    if (me) enterApp(); else renderAuthLanding();
+    if (me) { enterApp(); refreshDmBadge(); } else renderAuthLanding();
   })();
+
+  async function refreshDmBadge() {
+    if (!me) return;
+    try {
+      const flags = await DB.getMyFlags();
+      const convos = await DB.listConversations();
+      const unread = convos.filter((c) => !flags[c.partnerId]?.hidden).reduce((n, c) => n + (c.unread || 0), 0);
+      const badge = $("#dmBadge");
+      if (unread > 0) { badge.textContent = unread > 9 ? "9+" : unread; badge.hidden = false; }
+      else badge.hidden = true;
+    } catch {}
+  }
 })();

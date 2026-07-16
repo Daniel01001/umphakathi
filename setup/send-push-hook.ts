@@ -58,10 +58,17 @@ Deno.serve(async (req) => {
     }
     const body = (row.body ?? "").slice(0, 120);
 
-    // Everyone's devices, except the author's own.
-    const { data: subs } = await admin
-      .from("push_subscriptions").select("endpoint, subscription")
+    // People who hid or blocked the author don't get notified by them.
+    const { data: muted } = await admin
+      .from("member_flags").select("user_id")
+      .eq("target_id", row.user_id).or("hidden.eq.true,blocked.eq.true");
+    const mutedIds = new Set((muted ?? []).map((m) => m.user_id));
+
+    // Everyone's devices, except the author's own and anyone who muted them.
+    const { data: allSubs } = await admin
+      .from("push_subscriptions").select("endpoint, subscription, user_id")
       .neq("user_id", row.user_id);
+    const subs = (allSubs ?? []).filter((s) => !mutedIds.has(s.user_id));
 
     const notification = JSON.stringify({ title, body, url: "./index.html", tag, urgent });
 

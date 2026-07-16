@@ -507,6 +507,110 @@ body.no-chrome .shell { display: block; }
 .msg-img { max-width: 220px; border-radius: 10px; margin: 2px 0 4px; display: block; cursor: pointer; }
 .msg { transition: transform 0.15s ease; touch-action: pan-y; }
 
+/* top-bar direct-messages icon */
+.topbar-icon {
+  position: relative; width: 34px; height: 34px; border-radius: 50%;
+  font-size: 17px; display: grid; place-items: center; color: #fff;
+}
+.topbar-icon:hover { background: rgba(255, 255, 255, 0.12); }
+.dm-badge {
+  position: absolute; top: -2px; right: -2px; min-width: 16px; height: 16px;
+  background: var(--gold); color: var(--green-dark); font-size: 10px; font-weight: 700;
+  border-radius: 99px; display: grid; place-items: center; padding: 0 4px;
+}
+
+/* DM list extras */
+.dm-section-title { font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin: 18px 4px 10px; }
+.hidden-link { display: block; width: 100%; text-align: left; color: var(--muted); font-weight: 600; font-size: 14px; padding: 10px 4px; }
+.hidden-link:hover { color: var(--green); }
+.dm-barrier { text-align: center; color: var(--muted); font-size: 14px; padding: 14px; background: var(--bg); border-radius: 12px; margin-top: 8px; }
+.link-btn { color: var(--green); font-weight: 700; }
+
+/* member profile actions */
+.member-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 14px; }
+.member-note { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+.btn-outline.danger { border-color: #c95a5a; color: #b03a3a; }
+
+/* stories bar */
+.stories-bar { display: flex; gap: 12px; overflow-x: auto; padding: 2px 2px 14px; scrollbar-width: none; }
+.stories-bar::-webkit-scrollbar { display: none; }
+.story-item { display: flex; flex-direction: column; align-items: center; gap: 5px; flex: 0 0 auto; width: 64px; }
+.story-ring {
+  position: relative; width: 60px; height: 60px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: linear-gradient(135deg, var(--green), var(--gold));
+  padding: 3px;
+}
+.story-ring .avatar { width: 100%; height: 100%; border: 2px solid var(--card); }
+.story-ring-add { background: var(--line); }
+.story-ring.mine { background: linear-gradient(135deg, var(--gold), var(--green)); }
+.story-plus {
+  position: absolute; right: -2px; bottom: -2px; width: 20px; height: 20px;
+  background: var(--green); color: #fff; border-radius: 50%; border: 2px solid var(--card);
+  display: grid; place-items: center; font-size: 12px;
+}
+.story-name { font-size: 11.5px; color: var(--ink); max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* story composer */
+.story-bgs { display: flex; gap: 8px; }
+.story-bg { width: 30px; height: 30px; border-radius: 50%; border: 2px solid transparent; }
+.story-bg.on { border-color: var(--ink); }
+
+/* story viewer (full screen) */
+.story-viewer { position: fixed; inset: 0; z-index: 100; background: #000; display: flex; flex-direction: column; }
+.story-progress { display: flex; gap: 4px; padding: 10px 10px 4px; }
+.story-pbar { flex: 1; height: 3px; background: rgba(255, 255, 255, 0.3); border-radius: 2px; overflow: hidden; }
+.story-pbar i { display: block; height: 100%; width: 0; background: #fff; }
+.story-topbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; color: #fff; }
+.story-author { font-weight: 700; font-size: 14px; }
+.story-when { font-size: 12px; opacity: 0.7; }
+.story-close { margin-left: auto; color: #fff; font-size: 18px; padding: 6px; }
+.story-body { flex: 1; display: grid; place-items: center; position: relative; overflow: hidden; }
+.story-body img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.story-text { padding: 24px; }
+.story-caption { color: #fff; text-align: center; font-size: 18px; line-height: 1.5; padding: 12px; }
+.story-caption.big { font-size: 28px; font-weight: 600; }
+.story-nav { position: absolute; top: 60px; bottom: 0; width: 40%; background: transparent; }
+.story-prev { left: 0; }
+.story-next { right: 0; }
+
+/* clickable member names/avatars */
+.member-link { cursor: pointer; }
+.post-author.member-link:hover, .msg-author.member-link:hover { text-decoration: underline; }
+
+/* message options menu (⋯ / long-press) — vertical popover */
+.msg-menu {
+  display: block; border-radius: 14px; padding: 6px;
+  min-width: 150px; background: var(--card);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.2);
+}
+.msg-menu-emojis { display: flex; gap: 2px; justify-content: space-between; padding: 2px 2px 6px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.msg-menu-item { display: block; width: 100%; text-align: left; padding: 9px 12px; border-radius: 8px; font-size: 14px; }
+.msg-menu-item:hover { background: var(--bg); }
+.msg-menu-item.danger { color: #b03a3a; }
+.msg-menu-item.danger:hover { background: var(--red-soft); }
+
+/* sub-views (member profile, DM list, DM thread) */
+.subview-head {
+  display: flex; align-items: center; gap: 10px;
+  font-weight: 700; font-size: 17px; margin-bottom: 14px;
+}
+.back-btn { font-size: 22px; width: 36px; height: 36px; border-radius: 50%; color: var(--ink); }
+.back-btn:hover { background: var(--bg); }
+.member-hero { text-align: center; padding: 24px 16px; }
+.member-hero .avatar-lg { margin: 0 auto 12px; }
+.member-hero h2 { font-size: 22px; }
+.member-hero .btn-primary { margin-top: 14px; }
+.member-posts-title { font-weight: 700; font-size: 15px; margin: 6px 2px 12px; color: var(--muted); }
+
+/* direct-message conversation list */
+.convo-row { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; padding: 12px 14px; }
+.convo-meta { flex: 1; min-width: 0; }
+.convo-name { font-weight: 700; font-size: 15px; }
+.convo-last { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-unread { background: var(--green); color: #fff; font-size: 12px; font-weight: 700; min-width: 20px; height: 20px; border-radius: 99px; display: grid; place-items: center; padding: 0 6px; }
+.dm-thread .subview-head { padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+
 /* profile photo edit */
 .avatar-edit { position: relative; display: inline-block; margin: 0 auto 12px; }
 .avatar-edit-badge {
